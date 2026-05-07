@@ -275,7 +275,9 @@ function tick() {
   for (const [id, hs] of humanState) {
     const p = world.players.get(id);
     if (!p || p.dead) continue;
-    intents.set(id, hs.intent);
+    // Snapshot intent fields — must be a copy, not a shared reference, or
+    // consuming the dash flag below wipes the value before tickWorld reads it.
+    intents.set(id, { mx: hs.intent.mx, my: hs.intent.my, dash: hs.intent.dash });
     // Consume the dash flag — it's edge-triggered
     if (hs.intent.dash) hs.intent.dash = false;
   }

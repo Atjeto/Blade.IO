@@ -352,7 +352,7 @@ function botIntent(world, b, dt) {
   b._aiTargetT -= dt;
   let dx = 0, dy = 0;
   const view = 700;
-  const SEP_R = 90;
+  const bRad = pRadius(b);
   let threat = null, threatD = Infinity;
   let prey = null, preyD = Infinity;
   let sx = 0, sy = 0; // separation accumulator (away from nearby entities)
@@ -360,8 +360,10 @@ function botIntent(world, b, dt) {
     if (o.id === b.id || o.dead) continue;
     const ox = o.x - b.x, oy = o.y - b.y;
     const d = Math.hypot(ox, oy);
-    if (d > 0 && d < SEP_R) {
-      const w = (1 - d / SEP_R);
+    // Tight personal-bubble separation: scaled by both bodies' radii.
+    const bubble = (bRad + pRadius(o)) * 1.6;
+    if (d > 0 && d < bubble) {
+      const w = (1 - d / bubble);
       sx -= (ox / d) * w;
       sy -= (oy / d) * w;
     }
@@ -399,9 +401,12 @@ function botIntent(world, b, dt) {
     }
     dx = b._aiTargetX - b.x; dy = b._aiTargetY - b.y;
   }
+  // Cap separation so it can't dominate the chase / wander vector.
+  const sm = Math.hypot(sx, sy);
+  if (sm > 1) { sx /= sm; sy /= sm; }
   const tm = Math.hypot(dx, dy) || 1;
-  const mx = (dx / tm) + sx * 0.7;
-  const my = (dy / tm) + sy * 0.7;
+  const mx = (dx / tm) + sx * 0.55;
+  const my = (dy / tm) + sy * 0.55;
   const m = Math.hypot(mx, my) || 1;
   return { mx: mx / m, my: my / m, dash: false };
 }
@@ -531,8 +536,11 @@ function tickWorld(world, dt, intentsById) {
       }
     }
 
-    mx = mx * 0.85 + sx * 0.6;
-    my = my * 0.85 + sy * 0.6;
+    // Cap separation so it can't reverse the chase direction.
+    const sm = Math.hypot(sx, sy);
+    if (sm > 1) { sx /= sm; sy /= sm; }
+    mx = mx + sx * 0.45;
+    my = my + sy * 0.45;
     const ml = Math.hypot(mx, my) || 1;
     e.x += (mx / ml) * e.speed * dt;
     e.y += (my / ml) * e.speed * dt;
@@ -658,7 +666,8 @@ function snapshot(world) {
   }
   const shrines = world.shrines.map(s => ({ id: s.id, x: s.x, y: s.y, c: s.charge >= 1 ? 1 : 0, cd: Math.round(s.cd * 10) / 10 }));
   return {
-    t: Math.round(world.t * 10) / 10,
+    // Precise enough to drive client-side blade-angle sync without visible jitter.
+    t: Math.round(world.t * 1000) / 1000,
     players, enemies, gems, augments, shrines,
     events: world.events.slice(),
   };

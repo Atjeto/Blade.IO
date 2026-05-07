@@ -873,8 +873,11 @@ function drawPlayer(p){
   ctx.beginPath(); ctx.arc(0,0,r*0.18,0,TAU); ctx.fill();
   ctx.restore();
 
-  // blades — use server-provided count/speed/size/radius and a synced phase
-  const t = performance.now()/1000;
+  // blades — use server clock so visual rotation matches server-side hit detection.
+  // Local player uses "now" (their position is predicted to now); others use the
+  // interp-delayed time to match their displayed (interpolated) position.
+  const tNow = lastSnap.t + (performance.now() - snapRecvAt) / 1000;
+  const t = isYou ? tNow : (tNow - INTERP_DELAY_MS / 1000);
   const br = pBladeRadius(p), bs = pBladeSize(p);
   for (let i=0; i<p.bc; i++){
     const ang = (p.b ? p.sp : 0) + t*p.bs + (i/p.bc)*TAU;
