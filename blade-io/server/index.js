@@ -189,22 +189,6 @@ wss.on('connection', (ws, req) => {
       hs.intent.mx = clampNum(msg.mx, -1, 1);
       hs.intent.my = clampNum(msg.my, -1, 1);
       hs.intent.dash = !!msg.dash;
-    } else if (msg.type === 'pick_upgrade') {
-      const id = wsState.id;
-      if (!id) return;
-      const p = world.players.get(id);
-      if (!p || p.dead) return;
-      if (!p.pendingLevelUp || !p.levelUpOpts) return;
-      const opt = p.levelUpOpts.find(o => o.id === msg.id);
-      if (!opt) return;
-      sim.applyUpgrade(p, opt.id);
-      p.pendingLevelUp = Math.max(0, p.pendingLevelUp - 1);
-      if (p.pendingLevelUp > 0) {
-        p.levelUpOpts = sim.generateLevelUpOptions(p);
-        send(ws, { type: 'level_up', options: p.levelUpOpts });
-      } else {
-        p.levelUpOpts = null;
-      }
     } else if (msg.type === 'respawn') {
       const id = wsState.id;
       if (!id) return;
@@ -287,16 +271,6 @@ function tick() {
   sim.tickWorld(world, dt, intents);
 
   respawnDeadBots();
-
-  // For any human with a pending level-up that hasn't been offered yet, offer it
-  for (const [id, hs] of humanState) {
-    const p = world.players.get(id);
-    if (!p || p.dead) continue;
-    if (p.pendingLevelUp > 0 && !p.levelUpOpts) {
-      p.levelUpOpts = sim.generateLevelUpOptions(p);
-      send(hs.ws, { type: 'level_up', options: p.levelUpOpts });
-    }
-  }
 
   // Death notifications to clients (kill events from sim get broadcast in snapshot)
   // Snapshot

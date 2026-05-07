@@ -295,7 +295,6 @@ let prevSnap = null;       // previous snapshot, for interpolation
 let snapRecvAt = 0;
 let prevSnapRecvAt = 0;
 const SNAP_INTERVAL = 1/30; // server tick rate
-let pendingLevelUp = null; // {options}
 let myKillCount = 0;
 let lastInputSentAt = 0;
 let pingMs = 0;
@@ -348,7 +347,6 @@ function handleServerMessage(m){
     myId = m.id;
     iAmDead = false;
     me = null;
-    pendingLevelUp = null;
     myKillCount = 0;
     modal.classList.remove('show');
   } else if (m.type === 'reject') {
@@ -391,9 +389,6 @@ function handleServerMessage(m){
         else { me.x += dx * 0.25; me.y += dy * 0.25; me.vx = meSnap.vx; me.vy = meSnap.vy; }
       }
     }
-  } else if (m.type === 'level_up') {
-    pendingLevelUp = { options: m.options };
-    showLevelUp();
   } else if (m.type === 'pong') {
     pingMs = Math.round(performance.now() - m.t);
   }
@@ -462,6 +457,19 @@ function handleEvent(ev){
     spawnRing(ev.x, ev.y, 80, 'rgba(42,138,95,.6)', 0.6);
     burst(ev.x, ev.y, '#2a8a5f', 12, 180);
     if (ev.playerId === myId) floatText(ev.x, ev.y - 40, '+50% HP', '#2a8a5f', 22);
+  } else if (ev.type === 'augment_spawn') {
+    spawnRing(ev.x, ev.y, 36, 'rgba(58,141,181,.6)', 0.5);
+    if (ev.ownerId === myId) {
+      pushToast(`Level up! Grab the augment near you.`, 'kill');
+    }
+  } else if (ev.type === 'augment_pickup') {
+    const col = ev.tag === 'heal' ? '#d94a5e' : (ev.tag === 'shape' ? '#3a8db5' : (ev.tag === 'risk' ? '#8a5b9c' : '#2a8a5f'));
+    spawnRing(ev.x, ev.y, 60, col, 0.6);
+    burst(ev.x, ev.y, col, 14, 220);
+    if (ev.playerId === myId) {
+      floatText(ev.x, ev.y - 40, ev.name, col, 22);
+      pushToast(`Got <b>${escapeHtml(ev.name)}</b>`, 'kill');
+    }
   }
 }
 
@@ -635,6 +643,49 @@ function render(){
     ctx.fillRect(-r*pulse,-r*pulse,r*2*pulse,r*2*pulse);
     ctx.restore();
     ctx.shadowBlur=0;
+  }
+
+  // augment orbs (level-up pickups in world)
+  if (lastSnap.augments) {
+    for (const a of lastSnap.augments) {
+      if (a.x<vx0-40||a.x>vx1+40||a.y<vy0-40||a.y>vy1+40) continue;
+      const tagCol = a.tg==='heal' ? '#d94a5e' : (a.tg==='shape' ? '#3a8db5' : (a.tg==='risk' ? '#8a5b9c' : '#2a8a5f'));
+      const mine = a.o === myId;
+      const fading = a.l < 5;
+      const blink = fading && Math.floor(performance.now()/120)%2===0;
+      const pulse = 1 + Math.sin(performance.now()/200 + a.x*0.01)*0.18;
+      const r = 18 * pulse;
+      ctx.save();
+      ctx.translate(a.x, a.y);
+      // outer ring (mine vs anyone)
+      const ringCol = mine ? '#2a8a5f' : 'rgba(122,117,104,.55)';
+      ctx.strokeStyle = ringCol;
+      ctx.lineWidth = 2;
+      ctx.setLineDash(mine ? [] : [4,4]);
+      ctx.lineDashOffset = -performance.now()/80;
+      ctx.beginPath(); ctx.arc(0,0,r+8,0,TAU); ctx.stroke();
+      ctx.setLineDash([]);
+      // diamond body
+      if (!blink){
+        ctx.fillStyle = tagCol;
+        ctx.shadowColor = tagCol;
+        ctx.shadowBlur = 14;
+        ctx.rotate(Math.PI/4 + performance.now()/600);
+        ctx.fillRect(-r, -r, r*2, r*2);
+        ctx.shadowBlur = 0;
+        ctx.fillStyle = 'rgba(255,253,245,.7)';
+        ctx.fillRect(-r*0.4, -r*0.4, r*0.8, r*0.8);
+      }
+      ctx.restore();
+      // label above
+      ctx.font = "600 11px DM Mono, monospace";
+      ctx.textAlign = 'center';
+      ctx.fillStyle = 'rgba(255,253,245,.85)';
+      const w = ctx.measureText(a.n).width + 10;
+      ctx.fillRect(a.x - w/2, a.y - r - 18, w, 14);
+      ctx.fillStyle = tagCol;
+      ctx.fillText(a.n, a.x, a.y - r - 8);
+    }
   }
 
   // mobs (interpolated)
@@ -868,6 +919,18 @@ function drawMini(){
       mctx.beginPath(); mctx.arc(s.x*sx,s.y*sy,4,0,TAU); mctx.fill();
     }
   }
+  if (lastSnap.augments){
+    for (const a of lastSnap.augments){
+      if (a.o !== myId) continue;
+      mctx.fillStyle = '#3a8db5';
+      mctx.shadowColor = '#3a8db5'; mctx.shadowBlur = 6;
+      mctx.save();
+      mctx.translate(a.x*sx, a.y*sy); mctx.rotate(Math.PI/4);
+      mctx.fillRect(-4,-4,8,8);
+      mctx.restore();
+      mctx.shadowBlur = 0;
+    }
+  }
   for (const p of lastSnap.players) {
     if (p.d) continue;
     const arch = ARCHETYPES[p.a] || ARCHETYPES.dervish;
@@ -983,41 +1046,6 @@ function showStart(){
   const t = setInterval(()=>{
     if (connected) { $('connNote').textContent = 'press Engage to play'; clearInterval(t); }
   }, 200);
-}
-
-function showLevelUp(){
-  if (!pendingLevelUp || !pendingLevelUp.options) return;
-  const opts = pendingLevelUp.options;
-  card.innerHTML = `
-    <h1>Level Up</h1>
-    <div class="sub">// choose augment</div>
-    <div class="opts">
-      ${opts.map((o,i)=>`
-        <button class="opt ${o.tag||''}" data-i="${i}">
-          <div>
-            <span class="num">${i+1}</span>
-            <span class="name">${escapeHtml(o.name)}</span>
-          </div>
-          <span class="desc">${escapeHtml(o.desc)}</span>
-        </button>`).join('')}
-    </div>
-    <div class="small">tap or [1] [2] [3]</div>
-  `;
-  modal.classList.add('show');
-  const pickIdx = (idx) => {
-    const o = opts[idx]; if (!o) return;
-    ws.send(JSON.stringify({type:'pick_upgrade', id:o.id}));
-    pendingLevelUp = null;
-    modal.classList.remove('show');
-  };
-  card.querySelectorAll('.opt').forEach(btn=>btn.addEventListener('click',()=>pickIdx(+btn.dataset.i)));
-  const onKey = (e) => {
-    if (e.key==='1'||e.key==='2'||e.key==='3'){
-      pickIdx(parseInt(e.key)-1);
-      removeEventListener('keydown', onKey);
-    }
-  };
-  addEventListener('keydown', onKey);
 }
 
 function showDeath(meSnap){

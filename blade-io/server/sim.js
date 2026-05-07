@@ -84,8 +84,6 @@ function makePlayer({ id, x, y, name, archetype = 'dervish', isBot = false }) {
     dashCd: 0, dashing: 0, dashDx: 0, dashDy: 0,
     spinPhase: Math.random() * TAU,
     upgradeUses: {},
-    pendingLevelUp: 0,               // count of level-ups awaiting choice
-    levelUpOpts: null,
     _respawnT: 0,
     _aiTargetT: 0, _aiTargetX: x, _aiTargetY: y,
     _killCount: 0,
@@ -110,6 +108,7 @@ function newWorld() {
     players: new Map(),         // id -> player
     enemies: new Map(),         // id -> enemy
     gems: new Map(),            // id -> gem
+    augments: new Map(),        // id -> augment orb (level-up pickup)
     shrines: [],                // fixed list
     spawnT: 0,
     events: [],                 // transient events (kills, hits) sent each tick
@@ -302,14 +301,53 @@ function tickPlayer(world, p, dt, intent) {
         if (p.isBot) {
           botLevelUp(p);
         } else {
-          p.pendingLevelUp = (p.pendingLevelUp || 0) + 1;
+          spawnAugmentOrb(world, p);
         }
       }
     }
   }
 }
 
+// ---------- Augment orbs (in-world level-up pickups) ----------
+function spawnAugmentOrb(world, p) {
+  // Pick a random valid upgrade for this player
+  const pool = UPGRADES.filter(u => (p.upgradeUses[u.id] || 0) < u.max);
+  // Force-include heal if low HP
+  let upg;
+  if (p.hp / p.maxHp < 0.55 && Math.random() < 0.5) {
+    upg = { id: 'instant_heal', name: 'PATCH UP', desc: 'Restore 50% HP', max: 99, tag: 'heal' };
+  } else if (pool.length > 0) {
+    upg = pool[Math.floor(Math.random() * pool.length)];
+  } else {
+    return; // nothing to give
+  }
+  // Spawn near the player but not on top
+  const ang = Math.random() * TAU;
+  const dist = 80 + Math.random() * 40;
+  const orb = {
+    id: nid(world),
+    ownerId: p.id,
+    x: p.x + Math.cos(ang) * dist,
+    y: p.y + Math.sin(ang) * dist,
+    upgradeId: upg.id,
+    upgradeName: upg.name,
+    tag: upg.tag || null,
+    r: 18,
+    life: 30,                  // disappears after 30s if not picked
+    vx: Math.cos(ang) * 30,
+    vy: Math.sin(ang) * 30,
+  };
+  // clamp inside world
+  orb.x = clamp(orb.x, 50, WORLD.w - 50);
+  orb.y = clamp(orb.y, 50, WORLD.h - 50);
+  world.augments.set(orb.id, orb);
+  world.events.push({ type: 'augment_spawn', x: orb.x, y: orb.y, ownerId: p.id });
+}
+
+// ---------- Augment orbs (in-world level-up pickups) END ----------
+
 // ---------- AI bots ----------
+
 function botIntent(world, b, dt) {
   b._aiTargetT -= dt;
   let dx = 0, dy = 0;
@@ -420,17 +458,16 @@ function tickWorld(world, dt, intentsById) {
     }
   }
 
-  // Spawn mobs (denser, scattered)
+  // Spawn mobs (halved from before — was too dense, was lagging)
   world.spawnT -= dt;
   if (world.spawnT <= 0) {
-    const intensity = clamp(world.t / 60, 0.5, 3.0);
-    world.spawnT = rand(0.12, 0.30) / intensity;
-    const burstN = 2 + Math.floor(intensity);
+    const intensity = clamp(world.t / 60, 0.5, 2.0);
+    world.spawnT = rand(0.30, 0.55) / intensity;
+    const burstN = 1 + Math.floor(intensity * 0.5);
     for (let i = 0; i < burstN; i++) spawnEnemy(world);
   }
-  if (world.enemies.size > 260) {
-    // drop oldest
-    const ids = [...world.enemies.keys()].slice(0, world.enemies.size - 260);
+  if (world.enemies.size > 120) {
+    const ids = [...world.enemies.keys()].slice(0, world.enemies.size - 120);
     for (const id of ids) world.enemies.delete(id);
   }
 
@@ -453,7 +490,44 @@ function tickWorld(world, dt, intentsById) {
     }
   }
 
-  // Shrines
+  // Augment orbs: drift, decay, pickup by owner OR anyone if old enough
+  for (const orb of world.augments.values()) {
+    orb.life -= dt;
+    if (orb.life <= 0) {
+      world.augments.delete(orb.id);
+      continue;
+    }
+    // gentle drift, decay velocity
+    orb.x += orb.vx * dt;
+    orb.y += orb.vy * dt;
+    orb.vx *= 0.96;
+    orb.vy *= 0.96;
+    orb.x = clamp(orb.x, 30, WORLD.w - 30);
+    orb.y = clamp(orb.y, 30, WORLD.h - 30);
+
+    // After 8 seconds, the orb becomes anyone's to pick up. Before that, owner-only.
+    const anyoneCanGrab = orb.life < 22;
+
+    for (const ply of world.players.values()) {
+      if (ply.dead || ply.isBot) continue;
+      if (!anyoneCanGrab && ply.id !== orb.ownerId) continue;
+      const rr = pRadius(ply) + orb.r;
+      if (dist2(ply.x, ply.y, orb.x, orb.y) < rr * rr) {
+        applyUpgrade(ply, orb.upgradeId);
+        world.events.push({
+          type: 'augment_pickup',
+          x: orb.x, y: orb.y,
+          playerId: ply.id,
+          name: orb.upgradeName,
+          tag: orb.tag,
+        });
+        world.augments.delete(orb.id);
+        break;
+      }
+    }
+  }
+
+
   for (const s of world.shrines) {
     if (s.charge < 1) {
       s.cd -= dt;
@@ -517,10 +591,21 @@ function snapshot(world) {
   for (const g of world.gems.values()) {
     gems.push({ id: g.id, x: Math.round(g.x), y: Math.round(g.y), b: g.big ? 1 : 0 });
   }
+  const augments = [];
+  for (const a of world.augments.values()) {
+    augments.push({
+      id: a.id,
+      x: Math.round(a.x), y: Math.round(a.y),
+      o: a.ownerId,
+      n: a.upgradeName,
+      tg: a.tag || '',
+      l: Math.round(a.life * 10) / 10,
+    });
+  }
   const shrines = world.shrines.map(s => ({ id: s.id, x: s.x, y: s.y, c: s.charge >= 1 ? 1 : 0, cd: Math.round(s.cd * 10) / 10 }));
   return {
     t: Math.round(world.t * 10) / 10,
-    players, enemies, gems, shrines,
+    players, enemies, gems, augments, shrines,
     events: world.events.slice(),
   };
 }
