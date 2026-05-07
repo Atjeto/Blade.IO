@@ -357,6 +357,15 @@ function handleServerMessage(m){
     lastSnap = m.s;
     snapRecvAt = performance.now();
 
+    // Index players + enemies by id, cache "me" — used by render + interpolation
+    const pById = new Map();
+    for (const p of lastSnap.players) pById.set(p.id, p);
+    lastSnap.byId = pById;
+    lastSnap.me = myId ? (pById.get(myId) || null) : null;
+    const eById = new Map();
+    for (const e of lastSnap.enemies) eById.set(e.id, e);
+    lastSnap.eById = eById;
+
     // Process events
     if (lastSnap.events) {
       for (const ev of lastSnap.events) {
@@ -364,8 +373,8 @@ function handleServerMessage(m){
       }
     }
 
-    // Find me, sync prediction
-    const meSnap = lastSnap.players.find(p => p.id === myId);
+    // Sync prediction
+    const meSnap = lastSnap.me;
     if (meSnap) {
       myKillCount = meSnap.ks || 0;
       // detect death
@@ -378,15 +387,19 @@ function handleServerMessage(m){
       }
       // sync predicted
       if (!me || iAmDead) {
-        me = {
-          x: meSnap.x, y: meSnap.y, vx: meSnap.vx, vy: meSnap.vy,
-        };
+        me = { x: meSnap.x, y: meSnap.y, vx: meSnap.vx, vy: meSnap.vy };
       } else {
-        // gentle pull toward server position
+        // Soft pull toward server position; only hard-snap on large divergence.
         const dx = meSnap.x - me.x, dy = meSnap.y - me.y;
         const d = Math.hypot(dx, dy);
-        if (d > 80) { me.x = meSnap.x; me.y = meSnap.y; me.vx = meSnap.vx; me.vy = meSnap.vy; }
-        else { me.x += dx * 0.25; me.y += dy * 0.25; me.vx = meSnap.vx; me.vy = meSnap.vy; }
+        if (d > 220) {
+          me.x = meSnap.x; me.y = meSnap.y;
+          me.vx = meSnap.vx; me.vy = meSnap.vy;
+        } else {
+          me.x += dx * 0.18; me.y += dy * 0.18;
+          me.vx = me.vx * 0.65 + meSnap.vx * 0.35;
+          me.vy = me.vy * 0.65 + meSnap.vy * 0.35;
+        }
       }
     }
   } else if (m.type === 'pong') {
@@ -488,11 +501,11 @@ const cam = {x: WORLD.w/2, y: WORLD.h/2, zoom: 1, targetZoom: 1};
 // Local-prediction tick for the local player position
 function localPredict(dt){
   if (!me || !lastSnap || iAmDead) return;
-  const meSnap = lastSnap.players.find(p=>p.id===myId);
+  const meSnap = lastSnap.me;
   if (!meSnap) return;
   const sp = pSpeed(meSnap);
-  let i = intent();
-  let tvx = i.mx*sp, tvy = i.my*sp;
+  const i = intent();
+  const tvx = i.mx*sp, tvy = i.my*sp;
   me.vx += (tvx-me.vx)*Math.min(1, dt*8);
   me.vy += (tvy-me.vy)*Math.min(1, dt*8);
   const r = pRadius(meSnap);
@@ -500,45 +513,32 @@ function localPredict(dt){
   me.y = Math.max(r, Math.min(WORLD.h-r, me.y + me.vy*dt));
 }
 
-// Snapshot interpolation: render at (now - 100ms) so we have buffer
+// Snapshot interpolation: render at (now - 100ms) so we have buffer.
+// Writes _rx/_ry in place on each entity — no per-frame allocation.
 const INTERP_DELAY_MS = 100;
-function getInterpPlayers(){
-  if (!lastSnap) return [];
+function applyInterp(){
+  if (!lastSnap) return;
   const renderTime = performance.now() - INTERP_DELAY_MS;
-  if (!prevSnap || renderTime >= snapRecvAt) {
-    return lastSnap.players;
+  const span = prevSnap ? (snapRecvAt - prevSnapRecvAt) : 0;
+  const canInterp = prevSnap && span > 0 && renderTime < snapRecvAt;
+  const t = canInterp ? Math.max(0, Math.min(1, (renderTime - prevSnapRecvAt) / span)) : 1;
+  const prevP = canInterp ? prevSnap.byId : null;
+  const prevE = canInterp ? prevSnap.eById : null;
+  for (const p of lastSnap.players) {
+    const prev = prevP && prevP.get(p.id);
+    if (prev) { p._rx = prev.x + (p.x - prev.x) * t; p._ry = prev.y + (p.y - prev.y) * t; }
+    else { p._rx = p.x; p._ry = p.y; }
   }
-  const span = snapRecvAt - prevSnapRecvAt;
-  if (span <= 0) return lastSnap.players;
-  const t = Math.max(0, Math.min(1, (renderTime - prevSnapRecvAt) / span));
-  // build map of prev by id
-  const prevMap = new Map();
-  for (const p of prevSnap.players) prevMap.set(p.id, p);
-  return lastSnap.players.map(curr => {
-    const prev = prevMap.get(curr.id);
-    if (!prev) return curr;
-    return {
-      ...curr,
-      x: prev.x + (curr.x - prev.x) * t,
-      y: prev.y + (curr.y - prev.y) * t,
-    };
-  });
-}
-
-function getInterpEnemies(){
-  if (!lastSnap) return [];
-  if (!prevSnap) return lastSnap.enemies;
-  const renderTime = performance.now() - INTERP_DELAY_MS;
-  const span = snapRecvAt - prevSnapRecvAt;
-  if (span <= 0) return lastSnap.enemies;
-  const t = Math.max(0, Math.min(1, (renderTime - prevSnapRecvAt) / span));
-  const prevMap = new Map();
-  for (const e of prevSnap.enemies) prevMap.set(e.id, e);
-  return lastSnap.enemies.map(curr => {
-    const prev = prevMap.get(curr.id);
-    if (!prev) return curr;
-    return { ...curr, x: prev.x + (curr.x - prev.x) * t, y: prev.y + (curr.y - prev.y) * t };
-  });
+  for (const e of lastSnap.enemies) {
+    const prev = prevE && prevE.get(e.id);
+    if (prev) { e._rx = prev.x + (e.x - prev.x) * t; e._ry = prev.y + (e.y - prev.y) * t; }
+    else { e._rx = e.x; e._ry = e.y; }
+  }
+  // Local player overrides interpolated position with prediction.
+  if (lastSnap.me && me && !iAmDead) {
+    lastSnap.me._rx = me.x;
+    lastSnap.me._ry = me.y;
+  }
 }
 
 // ===== Render =====
@@ -554,6 +554,9 @@ function loop(now){
 
   // local prediction
   localPredict(dt);
+
+  // interpolate other entities once per frame (writes _rx/_ry in place)
+  applyInterp();
 
   // particles, floats, rings, shake
   for (const pt of particles) { pt.life -= dt; pt.x += pt.vx*dt; pt.y += pt.vy*dt; pt.vx*=0.92; pt.vy*=0.92; }
@@ -578,9 +581,10 @@ function render(){
   }
 
   // figure out my snapshot for camera/HUD
-  const meSnap = lastSnap.players.find(p=>p.id===myId);
-  const meRender = (me && meSnap && !iAmDead) ? { ...meSnap, x: me.x, y: me.y } : meSnap;
-  const camAnchor = meRender || { x: WORLD.w/2, y: WORLD.h/2, m: 10 };
+  const meSnap = lastSnap.me;
+  const camAnchor = (me && meSnap && !iAmDead)
+    ? { x: me.x, y: me.y, m: meSnap.m }
+    : (meSnap || { x: WORLD.w/2, y: WORLD.h/2, m: 10 });
 
   // camera follow + zoom
   const targetZoom = 1 / pView(camAnchor);
@@ -689,9 +693,10 @@ function render(){
   }
 
   // mobs (interpolated)
-  for (const e of getInterpEnemies()) {
-    if (e.x<vx0-30||e.x>vx1+30||e.y<vy0-30||e.y>vy1+30) continue;
-    ctx.save(); ctx.translate(e.x,e.y);
+  for (const e of lastSnap.enemies) {
+    const ex = e._rx, ey = e._ry;
+    if (ex<vx0-30||ex>vx1+30||ey<vy0-30||ey>vy1+30) continue;
+    ctx.save(); ctx.translate(ex,ey);
     const color = e.k==='tank' ? '#d94a5e' : (e.k==='fast' ? '#e09f3e' : '#7a7568');
     ctx.fillStyle = color;
     ctx.shadowColor=color; ctx.shadowBlur=4;
@@ -723,13 +728,15 @@ function render(){
   }
   ctx.globalAlpha=1;
 
-  // players (interpolated). swap in `me` for myself if alive.
-  const players = getInterpPlayers().filter(p=>!p.d).map(p=>{
-    if (p.id === myId && me && !iAmDead) return { ...p, x: me.x, y: me.y };
-    return p;
-  }).sort((a,b)=>a.m-b.m);
-  for (const p of players) {
-    if (p.x<vx0-200||p.x>vx1+200||p.y<vy0-200||p.y>vy1+200) continue;
+  // players (interpolated). _rx/_ry already hold render position incl. local me-prediction.
+  // Sort by mass (smaller drawn first → bigger players on top); cache sorted view per snap.
+  if (lastSnap._sortedPlayers === undefined || lastSnap._sortedPlayersAt !== snapRecvAt) {
+    lastSnap._sortedPlayers = lastSnap.players.slice().sort((a,b)=>a.m-b.m);
+    lastSnap._sortedPlayersAt = snapRecvAt;
+  }
+  for (const p of lastSnap._sortedPlayers) {
+    if (p.d) continue;
+    if (p._rx<vx0-200||p._rx>vx1+200||p._ry<vy0-200||p._ry>vy1+200) continue;
     drawPlayer(p);
   }
 
@@ -822,9 +829,10 @@ function drawPlayer(p){
   const arch = ARCHETYPES[p.a] || ARCHETYPES.dervish;
   const col = arch.color;
   const r = pRadius(p);
+  const px = p._rx, py = p._ry;
 
   ctx.save();
-  ctx.translate(p.x, p.y);
+  ctx.translate(px, py);
 
   // grace halo
   if (p.if>0){
@@ -865,11 +873,11 @@ function drawPlayer(p){
   const br = pBladeRadius(p), bs = pBladeSize(p);
   for (let i=0; i<p.bc; i++){
     const ang = (p.b ? p.sp : 0) + t*p.bs + (i/p.bc)*TAU;
-    const bx = p.x + Math.cos(ang)*br;
-    const by = p.y + Math.sin(ang)*br;
+    const bx = px + Math.cos(ang)*br;
+    const by = py + Math.sin(ang)*br;
     for (let k=1;k<=3;k++){
       const a2 = (p.b?p.sp:0) + (t-k*0.012)*p.bs + (i/p.bc)*TAU;
-      const tx=p.x+Math.cos(a2)*br, ty=p.y+Math.sin(a2)*br;
+      const tx=px+Math.cos(a2)*br, ty=py+Math.sin(a2)*br;
       const alpha = 0.13*(1-k/3);
       ctx.fillStyle = isYou ? `rgba(42,138,95,${alpha})` : `rgba(${hexRgb(col)},${alpha})`;
       ctx.beginPath(); ctx.arc(tx,ty,bs*(1-k/5),0,TAU); ctx.fill();
@@ -889,19 +897,19 @@ function drawPlayer(p){
   }
 
   // name + hp
-  const nameY = p.y - r - 16;
+  const nameY = py - r - 16;
   ctx.font = "600 13px Space Grotesk, sans-serif";
   ctx.textAlign='center';
   const nameW = ctx.measureText(p.n).width + 14;
   ctx.fillStyle='rgba(255,253,245,.85)';
-  ctx.fillRect(p.x-nameW/2, nameY-11, nameW, 16);
+  ctx.fillRect(px-nameW/2, nameY-11, nameW, 16);
   ctx.fillStyle = isYou ? '#2a8a5f' : col;
-  ctx.fillText(p.n, p.x, nameY+1);
+  ctx.fillText(p.n, px, nameY+1);
   const w = Math.max(50, r*2);
   ctx.fillStyle='rgba(26,29,36,.15)';
-  ctx.fillRect(p.x-w/2, p.y-r-7, w, 4);
+  ctx.fillRect(px-w/2, py-r-7, w, 4);
   ctx.fillStyle = p.h/p.mh>0.5 ? (isYou?'#2a8a5f':'#5fc28d') : (p.h/p.mh>0.25?'#e09f3e':'#d94a5e');
-  ctx.fillRect(p.x-w/2, p.y-r-7, w*(p.h/p.mh), 4);
+  ctx.fillRect(px-w/2, py-r-7, w*(p.h/p.mh), 4);
 }
 
 function drawMini(){
@@ -952,6 +960,9 @@ function drawMini(){
   mctx.strokeRect(cam.x*sx - vw/2, cam.y*sy - vh/2, vw, vh);
 }
 
+let _lastBoardSnapAt = 0;
+let _lastBoardCollapsed = null;
+let _lastBuildSig = '';
 function updateHUD(meSnap){
   if (!meSnap) return;
   hpFill.style.width = (meSnap.h/meSnap.mh*100)+'%';
@@ -965,29 +976,38 @@ function updateHUD(meSnap){
   // We don't know real cooldown here; show as ready by default. Server will reject if not.
   dashBtn.disabled = false;
   dashCdEl.textContent = 'READY';
-  // leaderboard
-  const all = lastSnap.players.filter(x=>!x.d).slice().sort((a,b)=>b.m - a.m);
+  // leaderboard — only rebuild when a new snapshot arrives or the panel toggles.
   const collapsed = board.classList.contains('collapsed');
-  let rows;
-  if (collapsed) {
-    const meIdx = all.findIndex(p=>p.id===myId);
-    if (meIdx >= 0 && meIdx < 3) rows = all.slice(0,3);
-    else if (meIdx >= 0) rows = [...all.slice(0,2), all[meIdx]];
-    else rows = all.slice(0,3);
-  } else {
-    rows = all.slice(0,8);
+  if (_lastBoardSnapAt !== snapRecvAt || _lastBoardCollapsed !== collapsed) {
+    _lastBoardSnapAt = snapRecvAt;
+    _lastBoardCollapsed = collapsed;
+    const all = lastSnap.players.filter(x=>!x.d).slice().sort((a,b)=>b.m - a.m);
+    let rows;
+    if (collapsed) {
+      const meIdx = all.findIndex(p=>p.id===myId);
+      if (meIdx >= 0 && meIdx < 3) rows = all.slice(0,3);
+      else if (meIdx >= 0) rows = [...all.slice(0,2), all[meIdx]];
+      else rows = all.slice(0,3);
+    } else {
+      rows = all.slice(0,8);
+    }
+    boardRows.innerHTML = rows.map(x=>{
+      const idx = all.indexOf(x)+1;
+      return `<div class="row ${x.id===myId?'you':''}"><span class="rk">${idx}</span><span class="nm">${escapeHtml(x.n)}</span><span class="ms">${Math.floor(x.m)}</span></div>`;
+    }).join('');
   }
-  boardRows.innerHTML = rows.map(x=>{
-    const idx = all.indexOf(x)+1;
-    return `<div class="row ${x.id===myId?'you':''}"><span class="rk">${idx}</span><span class="nm">${escapeHtml(x.n)}</span><span class="ms">${Math.floor(x.m)}</span></div>`;
-  }).join('');
-  buildTags.innerHTML = `
-    <div class="tag archetype"><b>${ARCHETYPES[meSnap.a].name}</b></div>
-    <div class="tag"><b>${meSnap.bc}</b> blades</div>
-    <div class="tag">spin <b>${meSnap.bs.toFixed(1)}</b></div>
-    <div class="tag">size <b>${Math.round(pBladeSize(meSnap))}</b></div>
-    <div class="tag">reach <b>${Math.round(pBladeRadius(meSnap))}</b></div>
-  `;
+  // build tags — only rebuild when the loadout actually changes.
+  const buildSig = `${meSnap.a}|${meSnap.bc}|${meSnap.bs}|${meSnap.bz}|${meSnap.br}|${Math.round(meSnap.m)}`;
+  if (buildSig !== _lastBuildSig) {
+    _lastBuildSig = buildSig;
+    buildTags.innerHTML = `
+      <div class="tag archetype"><b>${ARCHETYPES[meSnap.a].name}</b></div>
+      <div class="tag"><b>${meSnap.bc}</b> blades</div>
+      <div class="tag">spin <b>${meSnap.bs.toFixed(1)}</b></div>
+      <div class="tag">size <b>${Math.round(pBladeSize(meSnap))}</b></div>
+      <div class="tag">reach <b>${Math.round(pBladeRadius(meSnap))}</b></div>
+    `;
+  }
 }
 
 // ===== Modals =====

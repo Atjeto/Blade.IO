@@ -150,13 +150,13 @@ function spawnEnemy(world) {
   const wave = 1 + Math.floor(world.t / 30);
   let e;
   if (wave >= 4 && tier < 0.12) {
-    e = { x: ax, y: ay, r: 22, hp: 50 + wave*7, maxHp: 50 + wave*7, speed: 60 + wave*1.2, dmg: 18, xp: 5, kind: 'tank' };
+    e = { x: ax, y: ay, r: 22, hp: 50 + wave*7, maxHp: 50 + wave*7, speed: 60 + wave*1.2, dmg: 18, xp: 5, kind: 'tank', atkRate: 0.7 };
   } else if (wave >= 2 && tier < 0.35) {
-    e = { x: ax, y: ay, r: 9, hp: 14 + wave*2, maxHp: 14 + wave*2, speed: 140 + wave*3, dmg: 8, xp: 2, kind: 'fast' };
+    e = { x: ax, y: ay, r: 9, hp: 14 + wave*2, maxHp: 14 + wave*2, speed: 140 + wave*3, dmg: 8, xp: 2, kind: 'fast', atkRate: 0.4 };
   } else {
-    e = { x: ax, y: ay, r: 13, hp: 22 + wave*2.5, maxHp: 22 + wave*2.5, speed: 75 + wave*1.5, dmg: 10, xp: 1, kind: 'grunt' };
+    e = { x: ax, y: ay, r: 13, hp: 22 + wave*2.5, maxHp: 22 + wave*2.5, speed: 75 + wave*1.5, dmg: 10, xp: 1, kind: 'grunt', atkRate: 0.55 };
   }
-  e.id = nid(world); e.hitT = 0;
+  e.id = nid(world); e.hitT = 0; e.atkCd = Math.random() * 0.3;
   world.enemies.set(e.id, e);
 }
 
@@ -352,11 +352,19 @@ function botIntent(world, b, dt) {
   b._aiTargetT -= dt;
   let dx = 0, dy = 0;
   const view = 700;
+  const SEP_R = 90;
   let threat = null, threatD = Infinity;
   let prey = null, preyD = Infinity;
+  let sx = 0, sy = 0; // separation accumulator (away from nearby entities)
   for (const o of world.players.values()) {
     if (o.id === b.id || o.dead) continue;
-    const d = Math.hypot(o.x - b.x, o.y - b.y);
+    const ox = o.x - b.x, oy = o.y - b.y;
+    const d = Math.hypot(ox, oy);
+    if (d > 0 && d < SEP_R) {
+      const w = (1 - d / SEP_R);
+      sx -= (ox / d) * w;
+      sy -= (oy / d) * w;
+    }
     if (d > view) continue;
     if (o.mass > b.mass * 1.25) { if (d < threatD) { threatD = d; threat = o; } }
     else if (o.mass * 1.25 < b.mass) { if (d < preyD) { preyD = d; prey = o; } }
@@ -391,8 +399,11 @@ function botIntent(world, b, dt) {
     }
     dx = b._aiTargetX - b.x; dy = b._aiTargetY - b.y;
   }
-  const m = Math.hypot(dx, dy) || 1;
-  return { mx: dx / m, my: dy / m, dash: false };
+  const tm = Math.hypot(dx, dy) || 1;
+  const mx = (dx / tm) + sx * 0.7;
+  const my = (dy / tm) + sy * 0.7;
+  const m = Math.hypot(mx, my) || 1;
+  return { mx: mx / m, my: my / m, dash: false };
 }
 
 function botLevelUp(b) {
@@ -471,9 +482,21 @@ function tickWorld(world, dt, intentsById) {
     for (const id of ids) world.enemies.delete(id);
   }
 
-  // Mobs chase nearest alive player
+  // Spatial grid of enemies for cheap separation queries (rebuilt each tick).
+  const SEP_CELL = 220;
+  const sepGrid = new Map();
+  for (const e of world.enemies.values()) {
+    const key = (Math.floor(e.x / SEP_CELL) + 100) * 1000 + (Math.floor(e.y / SEP_CELL) + 100);
+    let arr = sepGrid.get(key);
+    if (!arr) { arr = []; sepGrid.set(key, arr); }
+    arr.push(e);
+  }
+
+  // Mobs chase nearest alive player, with separation + per-enemy attack cooldown
   for (const e of world.enemies.values()) {
     e.hitT = Math.max(0, e.hitT - dt);
+    if (e.atkCd > 0) e.atkCd -= dt;
+
     let nearest = null, nd = Infinity;
     for (const p of world.players.values()) {
       if (p.dead) continue;
@@ -481,12 +504,43 @@ function tickWorld(world, dt, intentsById) {
       if (d < nd) { nd = d; nearest = p; }
     }
     if (!nearest) continue;
-    const dx = nearest.x - e.x, dy = nearest.y - e.y, d = Math.hypot(dx, dy) || 1;
-    e.x += dx / d * e.speed * dt;
-    e.y += dy / d * e.speed * dt;
-    const r2 = (pRadius(nearest) + e.r);
-    if (dist2(nearest.x, nearest.y, e.x, e.y) < r2 * r2) {
+
+    const cdx = nearest.x - e.x, cdy = nearest.y - e.y;
+    const cd = Math.hypot(cdx, cdy) || 1;
+    let mx = cdx / cd, my = cdy / cd;
+
+    // Separation: 3x3 neighborhood
+    const ecx = Math.floor(e.x / SEP_CELL), ecy = Math.floor(e.y / SEP_CELL);
+    let sx = 0, sy = 0;
+    for (let gx = -1; gx <= 1; gx++) {
+      for (let gy = -1; gy <= 1; gy++) {
+        const arr = sepGrid.get((ecx + gx + 100) * 1000 + (ecy + gy + 100));
+        if (!arr) continue;
+        for (const o of arr) {
+          if (o === e) continue;
+          const ox = e.x - o.x, oy = e.y - o.y;
+          const od2 = ox * ox + oy * oy;
+          const minD = (e.r + o.r) * 1.6;
+          if (od2 > 0 && od2 < minD * minD) {
+            const od = Math.sqrt(od2);
+            const w = 1 - od / minD;
+            sx += (ox / od) * w;
+            sy += (oy / od) * w;
+          }
+        }
+      }
+    }
+
+    mx = mx * 0.85 + sx * 0.6;
+    my = my * 0.85 + sy * 0.6;
+    const ml = Math.hypot(mx, my) || 1;
+    e.x += (mx / ml) * e.speed * dt;
+    e.y += (my / ml) * e.speed * dt;
+
+    const r2 = pRadius(nearest) + e.r;
+    if (e.atkCd <= 0 && dist2(nearest.x, nearest.y, e.x, e.y) < r2 * r2) {
       damagePlayer(world, nearest, e.dmg, e);
+      e.atkCd = e.atkRate || 0.55;
     }
   }
 
