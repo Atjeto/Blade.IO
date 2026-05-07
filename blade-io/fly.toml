@@ -1,0 +1,31 @@
+# fly.toml — BLADE.IO
+# Run `fly launch --copy-config --no-deploy` first to claim the app name,
+# then `fly deploy` to ship.
+
+app = "blade-io"
+primary_region = "iad"  # change to your nearest Fly region if you want lower ping
+
+[build]
+
+[env]
+  NODE_ENV = "production"
+  PORT = "8080"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "off"   # keep the WebSocket server alive
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "30s"
+    method = "GET"
+    timeout = "5s"
+    path = "/healthz"
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 256
