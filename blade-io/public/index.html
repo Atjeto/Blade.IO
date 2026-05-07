@@ -271,8 +271,17 @@ dashBtn.addEventListener('click',e=>{e.preventDefault();queueDash()});
 dashBtn.addEventListener('touchstart',e=>{e.preventDefault();queueDash()},{passive:false});
 
 let dashQueued = false;
+// Client-side dash prediction so the dash feels instant instead of waiting for
+// server round-trip + reconciliation to drag the player forward.
+let localDashing = 0;        // remaining dash duration (s)
+let localDashDx = 0, localDashDy = 0;
+let localDashCd = 0;         // local estimate of dash cooldown (s)
+const DASH_DURATION = 0.18;
+const DASH_CD_BASE = 1.6;
+const DASH_SPEED_MULT = 4.5;
 function queueDash(){
   if (!myId || iAmDead) return;
+  if (localDashCd > 0) return;
   dashQueued = true;
 }
 
@@ -383,9 +392,11 @@ function handleServerMessage(m){
       // detect death
       if (meSnap.d && !iAmDead) {
         iAmDead = true;
+        localDashing = 0; localDashCd = 0;
         showDeath(meSnap);
       } else if (!meSnap.d && iAmDead) {
         iAmDead = false;
+        localDashing = 0; localDashCd = 0;
         modal.classList.remove('show');
       }
       // sync predicted
@@ -419,7 +430,27 @@ function sendInput(){
   }
   const i = intent();
   ws.send(JSON.stringify({type:'input', mx:i.mx, my:i.my, dash:i.dash}));
-  if (i.dash) dashQueued = false;
+  if (i.dash) {
+    dashQueued = false;
+    // Predict the dash locally so the pop is instant — server will confirm.
+    if (me && lastSnap && lastSnap.me) {
+      let dx = i.mx, dy = i.my;
+      const m = Math.hypot(dx, dy);
+      if (m < 0.1) {
+        const vm = Math.hypot(me.vx, me.vy);
+        if (vm > 5) { dx = me.vx / vm; dy = me.vy / vm; }
+        else { dx = 0; dy = 0; }
+      } else { dx /= m; dy /= m; }
+      if (dx || dy) {
+        localDashing = DASH_DURATION;
+        localDashDx = dx; localDashDy = dy;
+        localDashCd = DASH_CD_BASE;
+        // Visual flourish on the predicted dash start.
+        spawnRing(me.x, me.y, 50, 'rgba(42,138,95,.5)', 0.4);
+        burst(me.x, me.y, '#2a8a5f', 8, 260);
+      }
+    }
+  }
 }
 
 // ===== Visual effects (purely client-side, from events) =====
@@ -469,8 +500,11 @@ function handleEvent(ev){
       pushToast(`<b>${escapeHtml(ev.killerName||'?')}</b> ate <b>${escapeHtml(ev.victimName)}</b>`);
     }
   } else if (ev.type === 'dash') {
-    spawnRing(ev.x, ev.y, 50, 'rgba(42,138,95,.5)', 0.4);
-    burst(ev.x, ev.y, '#2a8a5f', 8, 260);
+    // Skip self — we already spawned the ring/burst at the local-predicted position.
+    if (ev.id !== myId) {
+      spawnRing(ev.x, ev.y, 50, 'rgba(42,138,95,.5)', 0.4);
+      burst(ev.x, ev.y, '#2a8a5f', 8, 260);
+    }
   } else if (ev.type === 'shrine_used') {
     spawnRing(ev.x, ev.y, 80, 'rgba(42,138,95,.6)', 0.6);
     burst(ev.x, ev.y, '#2a8a5f', 12, 180);
@@ -509,10 +543,17 @@ function localPredict(dt){
   const meSnap = lastSnap.me;
   if (!meSnap) return;
   const sp = pSpeed(meSnap);
-  const i = intent();
-  const tvx = i.mx*sp, tvy = i.my*sp;
-  me.vx += (tvx-me.vx)*Math.min(1, dt*8);
-  me.vy += (tvy-me.vy)*Math.min(1, dt*8);
+  if (localDashing > 0) {
+    localDashing -= dt;
+    me.vx = localDashDx * sp * DASH_SPEED_MULT;
+    me.vy = localDashDy * sp * DASH_SPEED_MULT;
+  } else {
+    const i = intent();
+    const tvx = i.mx*sp, tvy = i.my*sp;
+    me.vx += (tvx-me.vx)*Math.min(1, dt*8);
+    me.vy += (tvy-me.vy)*Math.min(1, dt*8);
+  }
+  if (localDashCd > 0) localDashCd = Math.max(0, localDashCd - dt);
   const r = pRadius(meSnap);
   me.x = Math.max(r, Math.min(WORLD.w-r, me.x + me.vx*dt));
   me.y = Math.max(r, Math.min(WORLD.h-r, me.y + me.vy*dt));
@@ -980,10 +1021,14 @@ function updateHUD(meSnap){
   massVal.textContent = Math.floor(meSnap.m);
   killsVal.textContent = myKillCount;
   pingVal.textContent = pingMs ? pingMs+'ms' : '—';
-  // dash button (we don't get dash CD in snapshot — derive optimistically: if iframes is 0 and not just dashed, assume ready)
-  // We don't know real cooldown here; show as ready by default. Server will reject if not.
-  dashBtn.disabled = false;
-  dashCdEl.textContent = 'READY';
+  // dash button cooldown (tracked locally — synced when we predict a dash)
+  if (localDashCd > 0) {
+    dashBtn.disabled = true;
+    dashCdEl.textContent = localDashCd.toFixed(1) + 's';
+  } else {
+    dashBtn.disabled = false;
+    dashCdEl.textContent = 'READY';
+  }
   // leaderboard — only rebuild when a new snapshot arrives or the panel toggles.
   const collapsed = board.classList.contains('collapsed');
   if (_lastBoardSnapAt !== snapRecvAt || _lastBoardCollapsed !== collapsed) {

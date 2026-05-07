@@ -381,11 +381,29 @@ function botIntent(world, b, dt) {
   }
   if (threat) {
     dx = b.x - threat.x; dy = b.y - threat.y;
+    b._aiPreyId = -1;
   } else if (shrine) {
     dx = shrine.x - b.x; dy = shrine.y - b.y;
+    b._aiPreyId = -1;
   } else if (prey) {
-    dx = prey.x - b.x; dy = prey.y - b.y;
+    // Orbit at our blade-radius so the blade tip actually passes through prey
+    // each rotation. Beelining onto prey leaves the blades sweeping empty space.
+    if (b._aiPreyId !== prey.id) {
+      b._aiPreyId = prey.id;
+      b._orbitDir = Math.random() < 0.5 ? 1 : -1;
+    }
+    if (Math.random() < 0.004) b._orbitDir = -b._orbitDir; // occasional juke
+    const px = prey.x - b.x, py = prey.y - b.y;
+    const pd = Math.hypot(px, py) || 1;
+    const optimalDist = pBladeRadius(b);
+    const radialErr = pd - optimalDist;
+    const radial = Math.tanh(radialErr / 70); // smooth: +1 approach, -1 retreat
+    const ux = px / pd, uy = py / pd;
+    const tangential = Math.max(0, 1 - Math.abs(radial) * 0.55); // orbit weight
+    dx = ux * radial + (-uy) * b._orbitDir * tangential;
+    dy = uy * radial + ( ux) * b._orbitDir * tangential;
   } else {
+    b._aiPreyId = -1;
     if (b._aiTargetT <= 0 || Math.hypot(b._aiTargetX - b.x, b._aiTargetY - b.y) < 60) {
       let bestG = null, bestD = Infinity;
       for (const g of world.gems.values()) {
