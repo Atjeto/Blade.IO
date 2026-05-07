@@ -211,9 +211,12 @@ let chosenArchetype = (ls && ls.getItem('blade_arch')) || 'dervish';
 if (!ARCHETYPES[chosenArchetype]) chosenArchetype = 'dervish';
 
 // ===== Canvas resize =====
+// Cap DPR lower on touch devices — iPhones report 3, drawing ~9x pixels of DPR=1.
+// 1.5 keeps it crisp at game distances while saving meaningful GPU + battery.
+const DPR_CAP = isTouch ? 1.5 : 2;
 let VW=0,VH=0,DPR=1;
 function resize(){
-  DPR = Math.min(2, devicePixelRatio||1);
+  DPR = Math.min(DPR_CAP, devicePixelRatio||1);
   VW = innerWidth; VH = innerHeight;
   cvs.width = VW*DPR; cvs.height = VH*DPR;
   cvs.style.width=VW+'px'; cvs.style.height=VH+'px';
@@ -389,14 +392,16 @@ function handleServerMessage(m){
       if (!me || iAmDead) {
         me = { x: meSnap.x, y: meSnap.y, vx: meSnap.vx, vy: meSnap.vy };
       } else {
-        // Soft pull toward server position; only hard-snap on large divergence.
+        // Proportional blend: small divergence eases in, large pulls hard.
+        // Only hard-reset on truly egregious gaps (respawn / teleport).
         const dx = meSnap.x - me.x, dy = meSnap.y - me.y;
         const d = Math.hypot(dx, dy);
-        if (d > 220) {
+        if (d > 800) {
           me.x = meSnap.x; me.y = meSnap.y;
           me.vx = meSnap.vx; me.vy = meSnap.vy;
         } else {
-          me.x += dx * 0.18; me.y += dy * 0.18;
+          const blend = Math.min(0.4, d / 400);
+          me.x += dx * blend; me.y += dy * blend;
           me.vx = me.vx * 0.65 + meSnap.vx * 0.35;
           me.vy = me.vy * 0.65 + meSnap.vy * 0.35;
         }

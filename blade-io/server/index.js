@@ -62,7 +62,19 @@ const httpServer = http.createServer((req, res) => {
 });
 
 // ---------- WebSocket ----------
-const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
+// perMessageDeflate cuts JSON snapshot bandwidth ~70% — meaningful on mobile data
+// plans and for battery. Tuned light: small mem footprint, no per-message context
+// takeover so each frame compresses independently (lower CPU, slightly worse ratio).
+const wss = new WebSocketServer({
+  server: httpServer,
+  path: '/ws',
+  perMessageDeflate: {
+    zlibDeflateOptions: { level: 3, memLevel: 7 },
+    clientNoContextTakeover: true,
+    serverNoContextTakeover: true,
+    threshold: 256,
+  },
+});
 
 // ---------- World ----------
 const world = sim.newWorld();
