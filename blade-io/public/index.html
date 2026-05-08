@@ -237,16 +237,8 @@ const hpFill=$('hpFill'),hpNum=$('hpNum'),xpFill=$('xpFill'),
       buildTags=$('buildTags'),toasts=$('toasts'),
       dashCdEl=$('dashCd'),dashBtn=$('dashBtn'),connStatus=$('connStatus');
 board.addEventListener('click',()=>board.classList.toggle('collapsed'));
-const muteBtn = $('muteBtn');
-if (muteBtn) {
-  muteBtn.textContent = _muted ? '🔇' : '🔊';
-  muteBtn.addEventListener('click', e => {
-    e.stopPropagation();
-    const m = toggleMute();
-    muteBtn.textContent = m ? '🔇' : '🔊';
-    if (!m) ensureAudio();  // unlock + ping a click sound back
-  });
-}
+// Mute-button wiring lives below in the audio module — _muted/toggleMute/ensureAudio
+// aren't defined yet here (TDZ on the let bindings would throw ReferenceError).
 
 // ===== Input =====
 const keys={};
@@ -555,6 +547,21 @@ function toggleMute(){
   _muted = !_muted;
   if (ls) ls.setItem('blade_mute', _muted ? '1' : '0');
   return _muted;
+}
+
+// Mute button wiring — placed here so the audio module bindings above are
+// initialized before we read _muted. (Earlier placement near the other HUD
+// refs would hit the let-TDZ and throw, which silently kills the whole
+// script — modal never renders, game looks like it didn't start.)
+const muteBtn = $('muteBtn');
+if (muteBtn) {
+  muteBtn.textContent = _muted ? '🔇' : '🔊';
+  muteBtn.addEventListener('click', e => {
+    e.stopPropagation();
+    const m = toggleMute();
+    muteBtn.textContent = m ? '🔇' : '🔊';
+    if (!m) ensureAudio();
+  });
 }
 
 // ===== Visual effects (purely client-side, from events) =====
