@@ -480,7 +480,11 @@ let prevLevel = 1;          // last seen level — triggers level-up effect on i
 
 // Per-frame blade-vs-enemy overlap detection for instant visual sparks.
 // Cooldown per (blade-index, enemy-id) pair so we don't drown in particles.
-const bladeSparkT = {};
+// Map (not plain object) so we can .clear() cheaply — the keys are
+// `bladeIdx_enemyId` and enemy IDs increment forever, so without periodic
+// pruning this would grow until tab refresh.
+const bladeSparkT = new Map();
+let bladeSparkLastPurge = 0;
 
 // Kill streak combo — fully client-side, visual only.
 let comboCount = 0;
@@ -728,13 +732,21 @@ function loop(now){
         const rr = bs + e.r;
         if (px2 * px2 + py2 * py2 < rr * rr) {
           const key = i + '_' + e.id;
-          if ((bladeSparkT[key] || 0) + 0.08 < tBlade) {
-            bladeSparkT[key] = tBlade;
+          if ((bladeSparkT.get(key) || 0) + 0.08 < tBlade) {
+            bladeSparkT.set(key, tBlade);
             burst(cx, cy, '#fff7e0', 2, 80);
           }
         }
       }
     }
+  }
+
+  // Periodic GC of stale spark cooldowns. The 0.08 s gating means a key
+  // that hasn't been touched in 5 s is safely discardable — the cooldown
+  // has long since elapsed.
+  if (now - bladeSparkLastPurge > 5000) {
+    bladeSparkLastPurge = now;
+    bladeSparkT.clear();
   }
 
   // particles, floats, rings, shake

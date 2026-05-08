@@ -311,6 +311,22 @@ setInterval(() => {
   }
 }, 15000);
 
+// Memory pressure logging — visibility on the 512 MB hosting tier.
+// Prints RSS + heap + entity counts every 60s so we can correlate growth
+// with player activity. If RSS climbs past ~400 MB we're getting close to
+// the hard cap and something's still leaking.
+setInterval(() => {
+  const m = process.memoryUsage();
+  const mb = b => (b / 1024 / 1024).toFixed(1);
+  const humans = [...world.players.values()].filter(p => !p.isBot).length;
+  console.log(
+    `[mem] rss=${mb(m.rss)}MB  heap=${mb(m.heapUsed)}/${mb(m.heapTotal)}MB  ` +
+    `ext=${mb(m.external)}MB  | players=${world.players.size}(h${humans})  ` +
+    `enemies=${world.enemies.size}  gems=${world.gems.size}  ` +
+    `augments=${world.augments.size}  sockets=${sockets.size}`
+  );
+}, 60000);
+
 // ---------- Boot ----------
 httpServer.listen(PORT, () => {
   console.log(`BLADE.IO server listening on :${PORT}`);

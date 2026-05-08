@@ -12,6 +12,12 @@
 const TAU = Math.PI * 2;
 const WORLD = { w: 3600, h: 3600 };
 
+// Memory caps — designed for 512 MB free-tier hosting.
+const GEM_LIFE        = 60;   // seconds; uncollected gems decay
+const GEM_CAP         = 250;  // hard ceiling on simultaneous gems
+const AUGMENT_CAP     = 25;   // hard ceiling on level-up orbs
+const ENEMY_CAP       = 120;  // hard ceiling on simultaneous enemies
+
 const ARCHETYPES = {
   reaver: {
     name: 'REAVER',
@@ -120,6 +126,9 @@ function newWorld() {
     shrines: [],                // fixed list
     spawnT: 0,
     events: [],                 // transient events (kills, hits) sent each tick
+    // Reused per-tick scratch space to avoid GC churn at 30 Hz.
+    _sepGrid: new Map(),        // cellKey -> enemy[]
+    _sepCellPool: [],           // recycled empty arrays
   };
 }
 
@@ -197,14 +206,16 @@ function damageEnemy(world, e, dmg, killer, hitX, hitY) {
   if (e.hp <= 0) {
     world.enemies.delete(e.id);
     // Champions drop a cluster of gems for that "boss kill" payoff.
+    // .life is the decay timer — gems left unpicked vanish after GEM_LIFE
+    // seconds so they can't pile up forever on a 512 MB free-tier server.
     if (e.kind === 'champion') {
       for (let i = 0; i < 8; i++) {
         const ang = Math.random() * TAU, d = rand(8, 36);
-        const g = { id: nid(world), x: e.x + Math.cos(ang)*d, y: e.y + Math.sin(ang)*d, xp: 2, mass: 2.2, r: 6, big: true };
+        const g = { id: nid(world), x: e.x + Math.cos(ang)*d, y: e.y + Math.sin(ang)*d, xp: 2, mass: 2.2, r: 6, big: true, life: GEM_LIFE };
         world.gems.set(g.id, g);
       }
     } else {
-      const g = { id: nid(world), x: e.x, y: e.y, xp: e.xp, mass: e.xp * 1.0, r: 5 };
+      const g = { id: nid(world), x: e.x, y: e.y, xp: e.xp, mass: e.xp * 1.0, r: 5, life: GEM_LIFE };
       world.gems.set(g.id, g);
     }
     world.events.push({
@@ -239,7 +250,7 @@ function onPlayerKilled(world, p, killer) {
       id: nid(world),
       x: p.x + Math.cos(ang) * d,
       y: p.y + Math.sin(ang) * d,
-      xp: 2, mass: 1.5, r: 6, big: true,
+      xp: 2, mass: 1.5, r: 6, big: true, life: GEM_LIFE,
     };
     world.gems.set(g.id, g);
   }
@@ -581,18 +592,31 @@ function tickWorld(world, dt, intentsById) {
     const burstN = 1 + Math.floor(intensity * 0.5);
     for (let i = 0; i < burstN; i++) spawnEnemy(world);
   }
-  if (world.enemies.size > 120) {
-    const ids = [...world.enemies.keys()].slice(0, world.enemies.size - 120);
-    for (const id of ids) world.enemies.delete(id);
+  if (world.enemies.size > ENEMY_CAP) {
+    // Map keys are insertion-ordered → oldest first.
+    const drop = world.enemies.size - ENEMY_CAP;
+    let i = 0;
+    for (const id of world.enemies.keys()) {
+      world.enemies.delete(id);
+      if (++i >= drop) break;
+    }
   }
 
-  // Spatial grid of enemies for cheap separation queries (rebuilt each tick).
+  // Spatial grid of enemies for cheap separation queries.
+  // Recycle the inner arrays through a pool so we don't allocate ~25
+  // arrays per tick (= 750/sec at 30 Hz) — a real GC pressure source.
   const SEP_CELL = 220;
-  const sepGrid = new Map();
+  const sepGrid = world._sepGrid;
+  const sepPool = world._sepCellPool;
+  for (const arr of sepGrid.values()) { arr.length = 0; sepPool.push(arr); }
+  sepGrid.clear();
   for (const e of world.enemies.values()) {
     const key = (Math.floor(e.x / SEP_CELL) + 100) * 1000 + (Math.floor(e.y / SEP_CELL) + 100);
     let arr = sepGrid.get(key);
-    if (!arr) { arr = []; sepGrid.set(key, arr); }
+    if (!arr) {
+      arr = sepPool.pop() || [];
+      sepGrid.set(key, arr);
+    }
     arr.push(e);
   }
 
@@ -648,6 +672,33 @@ function tickWorld(world, dt, intentsById) {
     if (e.atkCd <= 0 && dist2(nearest.x, nearest.y, e.x, e.y) < r2 * r2) {
       damagePlayer(world, nearest, e.dmg, e);
       e.atkCd = e.atkRate || 0.55;
+    }
+  }
+
+  // Gems: decay uncollected drops + hard cap. Without this, kill 500 mobs
+  // in distant corners and you've got 500 gem objects allocated forever
+  // until someone walks them. On 512 MB free tier that's the leak.
+  for (const g of world.gems.values()) {
+    g.life = (g.life != null ? g.life : GEM_LIFE) - dt;
+    if (g.life <= 0) world.gems.delete(g.id);
+  }
+  if (world.gems.size > GEM_CAP) {
+    const drop = world.gems.size - GEM_CAP;
+    let i = 0;
+    for (const id of world.gems.keys()) {
+      world.gems.delete(id);
+      if (++i >= drop) break;
+    }
+  }
+
+  // Augment orb hard cap — bots can't spawn them but humans leveling up fast
+  // could in theory pile orbs if they ignore them. Prune oldest first.
+  if (world.augments.size > AUGMENT_CAP) {
+    const drop = world.augments.size - AUGMENT_CAP;
+    let i = 0;
+    for (const id of world.augments.keys()) {
+      world.augments.delete(id);
+      if (++i >= drop) break;
     }
   }
 
