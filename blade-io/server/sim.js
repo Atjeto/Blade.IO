@@ -149,7 +149,10 @@ function spawnEnemy(world) {
   const tier = Math.random();
   const wave = 1 + Math.floor(world.t / 30);
   let e;
-  if (wave >= 4 && tier < 0.12) {
+  if (wave >= 3 && tier < 0.04) {
+    // Champion: rare elite mob — fat HP, fat reward. Drops a cluster of gems.
+    e = { x: ax, y: ay, r: 28, hp: 180 + wave*14, maxHp: 180 + wave*14, speed: 55 + wave*0.8, dmg: 22, xp: 18, kind: 'champion', atkRate: 0.85 };
+  } else if (wave >= 4 && tier < 0.12) {
     e = { x: ax, y: ay, r: 22, hp: 50 + wave*7, maxHp: 50 + wave*7, speed: 60 + wave*1.2, dmg: 18, xp: 5, kind: 'tank', atkRate: 0.7 };
   } else if (wave >= 2 && tier < 0.35) {
     e = { x: ax, y: ay, r: 9, hp: 14 + wave*2, maxHp: 14 + wave*2, speed: 140 + wave*3, dmg: 8, xp: 2, kind: 'fast', atkRate: 0.4 };
@@ -157,17 +160,50 @@ function spawnEnemy(world) {
     e = { x: ax, y: ay, r: 13, hp: 22 + wave*2.5, maxHp: 22 + wave*2.5, speed: 75 + wave*1.5, dmg: 10, xp: 1, kind: 'grunt', atkRate: 0.55 };
   }
   e.id = nid(world); e.hitT = 0; e.atkCd = Math.random() * 0.3;
+  e._dmgAcc = 0; e._dmgEmitT = 0;
   world.enemies.set(e.id, e);
+  if (e.kind === 'champion') {
+    world.events.push({ type: 'champion_spawn', x: e.x, y: e.y, id: e.id });
+  }
 }
 
 // ---------- Damage ----------
-function damageEnemy(world, e, dmg) {
+function damageEnemy(world, e, dmg, killer) {
   e.hp -= dmg; e.hitT = 0.08;
+  // Accumulate damage; emit a "dmg" event ~3x/sec/enemy so the client can show
+  // floating numbers without being flooded with one event per tick.
+  e._dmgAcc = (e._dmgAcc || 0) + dmg;
+  if (world.t - (e._dmgEmitT || 0) > 0.3 && e._dmgAcc >= 0.5) {
+    world.events.push({
+      type: 'dmg',
+      x: e.x, y: e.y,
+      dmg: Math.round(e._dmgAcc * 10) / 10,
+      killerId: killer ? killer.id : null,
+      crit: dmg > 6 ? 1 : 0,
+    });
+    e._dmgAcc = 0;
+    e._dmgEmitT = world.t;
+  }
   if (e.hp <= 0) {
     world.enemies.delete(e.id);
-    const g = { id: nid(world), x: e.x, y: e.y, xp: e.xp, mass: e.xp * 1.0, r: 5 };
-    world.gems.set(g.id, g);
-    world.events.push({ type: 'enemy_killed', x: e.x, y: e.y, color: e.kind });
+    // Champions drop a cluster of gems for that "boss kill" payoff.
+    if (e.kind === 'champion') {
+      for (let i = 0; i < 8; i++) {
+        const ang = Math.random() * TAU, d = rand(8, 36);
+        const g = { id: nid(world), x: e.x + Math.cos(ang)*d, y: e.y + Math.sin(ang)*d, xp: 2, mass: 2.2, r: 6, big: true };
+        world.gems.set(g.id, g);
+      }
+    } else {
+      const g = { id: nid(world), x: e.x, y: e.y, xp: e.xp, mass: e.xp * 1.0, r: 5 };
+      world.gems.set(g.id, g);
+    }
+    world.events.push({
+      type: 'enemy_killed',
+      x: e.x, y: e.y,
+      kind: e.kind,
+      xp: e.xp,
+      killerId: killer ? killer.id : null,
+    });
     return true;
   }
   return false;
@@ -268,7 +304,7 @@ function tickPlayer(world, p, dt, intent) {
       const rr = bs + e.r;
       if (dist2(bx, by, e.x, e.y) < rr * rr) {
         const ddx = e.x - p.x, ddy = e.y - p.y, dd = Math.hypot(ddx, ddy) || 1;
-        damageEnemy(world, e, bdmg * dt * 8);
+        damageEnemy(world, e, bdmg * dt * 8, p);
         e.x += ddx / dd * 4 * dt * 60 * 0.016;
         e.y += ddy / dd * 4 * dt * 60 * 0.016;
       }

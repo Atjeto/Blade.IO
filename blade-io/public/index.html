@@ -389,14 +389,30 @@ function handleServerMessage(m){
     const meSnap = lastSnap.me;
     if (meSnap) {
       myKillCount = meSnap.ks || 0;
+      // detect level-up — fire the dramatic moment
+      if (meSnap.l > prevLevel) {
+        const lx = me ? me.x : meSnap.x;
+        const ly = me ? me.y : meSnap.y;
+        levelUpFlash = 0.55;
+        shake = Math.max(shake, 0.32);
+        spawnRing(lx, ly, 40, 'rgba(95,194,141,1)', 0.55);
+        spawnRing(lx, ly, 90, 'rgba(95,194,141,.65)', 0.8);
+        spawnRing(lx, ly, 160, 'rgba(95,194,141,.35)', 1.05);
+        burst(lx, ly, '#5fc28d', 36, 420);
+        floatText(lx, ly - 90, 'LEVEL ' + meSnap.l, '#5fc28d', 30);
+      }
+      prevLevel = meSnap.l;
       // detect death
       if (meSnap.d && !iAmDead) {
         iAmDead = true;
         localDashing = 0; localDashCd = 0;
+        comboCount = 0; comboTimer = 0;
         showDeath(meSnap);
       } else if (!meSnap.d && iAmDead) {
         iAmDead = false;
         localDashing = 0; localDashCd = 0;
+        comboCount = 0; comboTimer = 0;
+        prevLevel = meSnap.l;
         modal.classList.remove('show');
       }
       // sync predicted
@@ -459,6 +475,31 @@ const floats = [];
 const rings = [];
 let shake = 0;
 let deathFlash = 0;
+let levelUpFlash = 0;       // 0..1 fade overlay after level up
+let prevLevel = 1;          // last seen level — triggers level-up effect on increase
+
+// Kill streak combo — fully client-side, visual only.
+let comboCount = 0;
+let comboTimer = 0;
+const COMBO_WINDOW = 3.5;
+function bumpCombo(x, y) {
+  comboCount++;
+  comboTimer = COMBO_WINDOW;
+  if (comboCount >= 2) {
+    const tier =
+      comboCount >= 20 ? 'UNSTOPPABLE' :
+      comboCount >= 10 ? 'RAMPAGE' :
+      comboCount >= 5  ? `${comboCount}x COMBO` :
+      comboCount >= 3  ? 'TRIPLE!' :
+                         'DOUBLE!';
+    const size = 18 + Math.min(22, comboCount * 1.6);
+    floatText(x, y - 50, tier, '#ffaa44', size);
+    if (comboCount === 3 || comboCount === 5 || comboCount === 10 || comboCount === 20) {
+      shake = Math.max(shake, 0.18);
+      spawnRing(x, y, 50 + comboCount * 4, '#ffaa44', 0.6);
+    }
+  }
+}
 
 function burst(x,y,color,n,spd){
   for(let i=0;i<n;i++){
@@ -470,6 +511,7 @@ function spawnRing(x,y,r,color,life){
   rings.push({x,y,r0:r*0.4,r1:r*1.6,color,life,max:life});
 }
 function floatText(x,y,text,color,size){
+  if (floats.length > 50) floats.shift();
   floats.push({x,y,text,color,size,life:1.1,max:1.1,vy:-50});
 }
 function pushToast(html, cls=''){
@@ -486,12 +528,41 @@ function handleEvent(ev){
     // small burst at the hit player; if it's me, gentle shake
     burst(ev.x, ev.y, '#d94a5e', 3, 100);
     if (ev.id === myId) shake = Math.max(shake, 0.08);
+  } else if (ev.type === 'dmg') {
+    // Damage numbers — only show our own to avoid clutter.
+    if (ev.killerId === myId && ev.dmg >= 0.5) {
+      const jx = (Math.random()-0.5) * 18;
+      const txt = ev.dmg >= 10 ? Math.round(ev.dmg).toString() : ev.dmg.toFixed(1);
+      const col = ev.crit ? '#ffd455' : '#fff7e0';
+      const sz = ev.crit ? 16 : 12;
+      floatText(ev.x + jx, ev.y - 6, txt, col, sz);
+    }
   } else if (ev.type === 'enemy_killed') {
-    burst(ev.x, ev.y, '#7a7568', 8, 180);
+    const isChampion = ev.kind === 'champion';
+    burst(ev.x, ev.y, isChampion ? '#ffd455' : '#7a7568', isChampion ? 24 : 8, isChampion ? 360 : 180);
+    if (ev.killerId === myId) {
+      bumpCombo(ev.x, ev.y);
+      if (isChampion) {
+        shake = Math.max(shake, 0.45);
+        spawnRing(ev.x, ev.y, 110, '#ffd455', 1.0);
+        spawnRing(ev.x, ev.y, 70, '#ffd455', 0.7);
+        floatText(ev.x, ev.y - 40, 'CHAMPION DOWN', '#ffd455', 22);
+        pushToast(`<b>CHAMPION DOWN</b> · +${ev.xp} XP`, 'kill');
+      } else if (ev.xp >= 1) {
+        floatText(ev.x, ev.y - 6, '+' + ev.xp + ' XP', '#5fc28d', 12);
+      }
+    }
+  } else if (ev.type === 'champion_spawn') {
+    spawnRing(ev.x, ev.y, 90, '#ffd455', 1.1);
+    spawnRing(ev.x, ev.y, 50, '#ffd455', 0.8);
+    burst(ev.x, ev.y, '#ffd455', 14, 240);
+    pushToast(`<b>CHAMPION</b> incoming!`, 'kill');
   } else if (ev.type === 'kill') {
     burst(ev.x, ev.y, ev.color || '#d94a5e', 30, 400);
     spawnRing(ev.x, ev.y, 100, ev.color || '#d94a5e', 0.7);
     if (ev.killerId === myId) {
+      bumpCombo(ev.x, ev.y);
+      shake = Math.max(shake, 0.25);
       floatText(ev.x, ev.y - 30, `+${Math.floor((ev.mass||0)*0.3)} mass`, '#2a8a5f', 24);
       pushToast(`You ate <b>${escapeHtml(ev.victimName)}</b>`, 'kill');
     } else if (ev.victimId === myId) {
@@ -613,6 +684,11 @@ function loop(now){
   for (let i = rings.length-1; i>=0; i--) if (rings[i].life<=0) rings.splice(i,1);
   shake = Math.max(0, shake - dt);
   deathFlash = Math.max(0, deathFlash - dt*1.5);
+  levelUpFlash = Math.max(0, levelUpFlash - dt*1.4);
+  if (comboTimer > 0) {
+    comboTimer -= dt;
+    if (comboTimer <= 0) comboCount = 0;
+  }
 
   render();
   requestAnimationFrame(loop);
@@ -743,22 +819,45 @@ function render(){
     const ex = e._rx, ey = e._ry;
     if (ex<vx0-30||ex>vx1+30||ey<vy0-30||ey>vy1+30) continue;
     ctx.save(); ctx.translate(ex,ey);
-    const color = e.k==='tank' ? '#d94a5e' : (e.k==='fast' ? '#e09f3e' : '#7a7568');
-    ctx.fillStyle = color;
-    ctx.shadowColor=color; ctx.shadowBlur=4;
-    if (e.k==='fast'){
-      ctx.beginPath(); ctx.moveTo(0,-e.r); ctx.lineTo(e.r,0); ctx.lineTo(0,e.r); ctx.lineTo(-e.r,0); ctx.closePath(); ctx.fill();
-    } else if (e.k==='tank'){
-      ctx.fillRect(-e.r,-e.r,e.r*2,e.r*2);
-      ctx.strokeStyle='rgba(0,0,0,.2)'; ctx.lineWidth=2;
-      ctx.strokeRect(-e.r+3,-e.r+3,e.r*2-6,e.r*2-6);
+    const color = e.k==='champion' ? '#ffd455'
+               : e.k==='tank' ? '#d94a5e'
+               : e.k==='fast' ? '#e09f3e'
+               : '#7a7568';
+    if (e.k === 'champion') {
+      // Pulsing aura ring for visibility through chaos.
+      const pulse = 0.6 + 0.4 * Math.sin(performance.now()/180);
+      ctx.strokeStyle = `rgba(255,212,85,${0.5 * pulse})`;
+      ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(0,0,e.r + 10 + pulse*4, 0, TAU); ctx.stroke();
+      ctx.shadowColor = color; ctx.shadowBlur = 18;
+      ctx.fillStyle = color;
+      // 6-point star-ish shape
+      ctx.beginPath();
+      for (let i = 0; i < 12; i++) {
+        const a = (i / 12) * TAU + performance.now()/700;
+        const r = e.r * (i % 2 === 0 ? 1.0 : 0.78);
+        if (i === 0) ctx.moveTo(Math.cos(a)*r, Math.sin(a)*r);
+        else ctx.lineTo(Math.cos(a)*r, Math.sin(a)*r);
+      }
+      ctx.closePath(); ctx.fill();
     } else {
-      ctx.beginPath(); ctx.arc(0,0,e.r,0,TAU); ctx.fill();
+      ctx.fillStyle = color;
+      ctx.shadowColor=color; ctx.shadowBlur=4;
+      if (e.k==='fast'){
+        ctx.beginPath(); ctx.moveTo(0,-e.r); ctx.lineTo(e.r,0); ctx.lineTo(0,e.r); ctx.lineTo(-e.r,0); ctx.closePath(); ctx.fill();
+      } else if (e.k==='tank'){
+        ctx.fillRect(-e.r,-e.r,e.r*2,e.r*2);
+        ctx.strokeStyle='rgba(0,0,0,.2)'; ctx.lineWidth=2;
+        ctx.strokeRect(-e.r+3,-e.r+3,e.r*2-6,e.r*2-6);
+      } else {
+        ctx.beginPath(); ctx.arc(0,0,e.r,0,TAU); ctx.fill();
+      }
     }
     ctx.shadowBlur=0;
     if (e.h<e.mh){
       ctx.fillStyle='rgba(26,29,36,.3)'; ctx.fillRect(-e.r,-e.r-7,e.r*2,3);
-      ctx.fillStyle='#d94a5e'; ctx.fillRect(-e.r,-e.r-7,e.r*2*(e.h/e.mh),3);
+      ctx.fillStyle = e.k==='champion' ? '#ffd455' : '#d94a5e';
+      ctx.fillRect(-e.r,-e.r-7,e.r*2*(e.h/e.mh),3);
     }
     ctx.restore();
   }
@@ -815,6 +914,24 @@ function render(){
     ctx.globalAlpha = deathFlash*0.3;
     ctx.fillRect(0,0,VW,VH);
     ctx.globalAlpha=1;
+  }
+  if (levelUpFlash > 0) {
+    ctx.fillStyle = '#5fc28d';
+    ctx.globalAlpha = levelUpFlash * 0.22;
+    ctx.fillRect(0, 0, VW, VH);
+    ctx.globalAlpha = 1;
+  }
+  // Active combo readout above the local player.
+  if (comboCount >= 2 && meSnap && !iAmDead) {
+    const remain = comboTimer / COMBO_WINDOW;
+    ctx.font = `700 ${20 + Math.min(20, comboCount*1.5)}px Space Grotesk, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.globalAlpha = 0.55 + 0.45 * remain;
+    ctx.fillStyle = 'rgba(255,253,245,.85)';
+    ctx.fillText(`x${comboCount}`, VW/2 + 1, 60);
+    ctx.fillStyle = '#ffaa44';
+    ctx.fillText(`x${comboCount}`, VW/2, 60 - 1);
+    ctx.globalAlpha = 1;
   }
   if (meSnap && !iAmDead) {
     const hpRatio = meSnap.h / meSnap.mh;
@@ -975,6 +1092,13 @@ function drawMini(){
       mctx.fillStyle='rgba(42,138,95,.7)';
       mctx.beginPath(); mctx.arc(s.x*sx,s.y*sy,4,0,TAU); mctx.fill();
     }
+  }
+  for (const e of lastSnap.enemies) {
+    if (e.k !== 'champion') continue;
+    mctx.fillStyle = '#ffd455';
+    mctx.shadowColor = '#ffd455'; mctx.shadowBlur = 6;
+    mctx.beginPath(); mctx.arc(e.x*sx, e.y*sy, 4, 0, TAU); mctx.fill();
+    mctx.shadowBlur = 0;
   }
   if (lastSnap.augments){
     for (const a of lastSnap.augments){
