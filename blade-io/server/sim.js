@@ -168,18 +168,20 @@ function spawnEnemy(world) {
 }
 
 // ---------- Damage ----------
-function damageEnemy(world, e, dmg, killer) {
+function damageEnemy(world, e, dmg, killer, hitX, hitY) {
   e.hp -= dmg; e.hitT = 0.08;
-  // Accumulate damage; emit a "dmg" event ~3x/sec/enemy so the client can show
-  // floating numbers without being flooded with one event per tick.
+  // Damage events fire at the BLADE-TIP impact point, not the enemy center,
+  // so the client can visually correlate hits with the blade that struck.
   e._dmgAcc = (e._dmgAcc || 0) + dmg;
-  if (world.t - (e._dmgEmitT || 0) > 0.3 && e._dmgAcc >= 0.5) {
+  if (hitX != null) { e._lastHitX = hitX; e._lastHitY = hitY; }
+  // Tight throttle so each blade swing-through registers as a discrete hit.
+  if (world.t - (e._dmgEmitT || 0) > 0.08 && e._dmgAcc >= 0.5) {
     world.events.push({
       type: 'dmg',
-      x: e.x, y: e.y,
+      x: e._lastHitX != null ? e._lastHitX : e.x,
+      y: e._lastHitY != null ? e._lastHitY : e.y,
       dmg: Math.round(e._dmgAcc * 10) / 10,
       killerId: killer ? killer.id : null,
-      crit: dmg > 6 ? 1 : 0,
     });
     e._dmgAcc = 0;
     e._dmgEmitT = world.t;
@@ -304,7 +306,7 @@ function tickPlayer(world, p, dt, intent) {
       const rr = bs + e.r;
       if (dist2(bx, by, e.x, e.y) < rr * rr) {
         const ddx = e.x - p.x, ddy = e.y - p.y, dd = Math.hypot(ddx, ddy) || 1;
-        damageEnemy(world, e, bdmg * dt * 8, p);
+        damageEnemy(world, e, bdmg * dt * 8, p, bx, by);
         e.x += ddx / dd * 4 * dt * 60 * 0.016;
         e.y += ddy / dd * 4 * dt * 60 * 0.016;
       }

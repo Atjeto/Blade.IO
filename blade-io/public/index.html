@@ -478,6 +478,10 @@ let deathFlash = 0;
 let levelUpFlash = 0;       // 0..1 fade overlay after level up
 let prevLevel = 1;          // last seen level — triggers level-up effect on increase
 
+// Per-frame blade-vs-enemy overlap detection for instant visual sparks.
+// Cooldown per (blade-index, enemy-id) pair so we don't drown in particles.
+const bladeSparkT = {};
+
 // Kill streak combo — fully client-side, visual only.
 let comboCount = 0;
 let comboTimer = 0;
@@ -529,13 +533,16 @@ function handleEvent(ev){
     burst(ev.x, ev.y, '#d94a5e', 3, 100);
     if (ev.id === myId) shake = Math.max(shake, 0.08);
   } else if (ev.type === 'dmg') {
-    // Damage numbers — only show our own to avoid clutter.
+    // Damage numbers — only show our own. Event x/y is the blade-tip impact
+    // point, so the number floats from where the blade actually struck.
     if (ev.killerId === myId && ev.dmg >= 0.5) {
-      const jx = (Math.random()-0.5) * 18;
+      const isCrit = ev.dmg >= 8;
+      const jx = (Math.random()-0.5) * 8;
       const txt = ev.dmg >= 10 ? Math.round(ev.dmg).toString() : ev.dmg.toFixed(1);
-      const col = ev.crit ? '#ffd455' : '#fff7e0';
-      const sz = ev.crit ? 16 : 12;
+      const col = isCrit ? '#ffd455' : '#fff7e0';
+      const sz = isCrit ? 16 : 12;
       floatText(ev.x + jx, ev.y - 6, txt, col, sz);
+      burst(ev.x, ev.y, col, isCrit ? 4 : 2, isCrit ? 140 : 90);
     }
   } else if (ev.type === 'enemy_killed') {
     const isChampion = ev.kind === 'champion';
@@ -674,6 +681,32 @@ function loop(now){
 
   // interpolate other entities once per frame (writes _rx/_ry in place)
   applyInterp();
+
+  // Client-side visual sparks where my blades visibly overlap an enemy.
+  // Cosmetic only — server is authoritative for damage. This bridges the
+  // ~100 ms latency gap so the spark fires at the visible blade tip.
+  if (lastSnap && lastSnap.me && me && !iAmDead) {
+    const meSnap = lastSnap.me;
+    const tBlade = lastSnap.t + (now - snapRecvAt - INTERP_DELAY_MS) / 1000;
+    const br = pBladeRadius(meSnap);
+    const bs = pBladeSize(meSnap);
+    for (let i = 0; i < meSnap.bc; i++) {
+      const ang = tBlade * meSnap.bs + (i / meSnap.bc) * TAU;
+      const bx = me.x + Math.cos(ang) * br;
+      const by = me.y + Math.sin(ang) * br;
+      for (const e of lastSnap.enemies) {
+        const rr = bs + e.r;
+        const dx = bx - e._rx, dy = by - e._ry;
+        if (dx*dx + dy*dy < rr * rr) {
+          const key = i + '_' + e.id;
+          if ((bladeSparkT[key] || 0) + 0.08 < tBlade) {
+            bladeSparkT[key] = tBlade;
+            burst(bx, by, '#fff7e0', 2, 80);
+          }
+        }
+      }
+    }
+  }
 
   // particles, floats, rings, shake
   for (const pt of particles) { pt.life -= dt; pt.x += pt.vx*dt; pt.y += pt.vy*dt; pt.vx*=0.92; pt.vy*=0.92; }
