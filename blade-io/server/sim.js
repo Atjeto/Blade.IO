@@ -13,10 +13,12 @@ const TAU = Math.PI * 2;
 const WORLD = { w: 3600, h: 3600 };
 
 // Memory caps — designed for 512 MB free-tier hosting.
+// ENEMY_CAP 120 → 80: with summoners + boss waves the world was a mosh pit.
+// At 80 there's still plenty of pressure but each individual mob registers.
 const GEM_LIFE        = 60;   // seconds; uncollected gems decay
-const GEM_CAP         = 250;  // hard ceiling on simultaneous gems
-const AUGMENT_CAP     = 25;   // hard ceiling on level-up orbs
-const ENEMY_CAP       = 120;  // hard ceiling on simultaneous enemies
+const GEM_CAP         = 200;  // hard ceiling on simultaneous gems
+const AUGMENT_CAP     = 20;   // hard ceiling on level-up orbs
+const ENEMY_CAP       = 80;   // hard ceiling on simultaneous enemies
 
 // Boss wave escalation — every BOSS_WAVE_INTERVAL seconds, N champions
 // spawn at once with a pre-warning event. Number scales with elapsed time.
@@ -214,10 +216,10 @@ function spawnEnemy(world) {
   if (wave >= 3 && tier < 0.04) {
     // Champion: rare elite mob — fat HP, fat reward. Drops a cluster of gems.
     e = { x: ax, y: ay, r: 28, hp: 180 + wave*14, maxHp: 180 + wave*14, speed: 55 + wave*0.8, dmg: 22, xp: 18, kind: 'champion', atkRate: 0.85 };
-  } else if (wave >= 5 && tier < 0.08) {
-    // Summoner — kites, periodically spawns fast minions. Forces players
-    // to commit to the chase or risk being swarmed.
-    e = { x: ax, y: ay, r: 18, hp: 60 + wave*5, maxHp: 60 + wave*5, speed: 35, dmg: 14, xp: 5, kind: 'summoner', atkRate: 1.2, _summonT: rand(3, 5) };
+  } else if (wave >= 5 && tier < 0.05) {
+    // Summoner — kites, periodically spawns fast minions. Rarer than other
+    // elites (5%) because each one acts as a spawner, multiplying density.
+    e = { x: ax, y: ay, r: 18, hp: 60 + wave*5, maxHp: 60 + wave*5, speed: 35, dmg: 14, xp: 5, kind: 'summoner', atkRate: 1.2, _summonT: rand(6, 10) };
   } else if (wave >= 4 && tier < 0.14) {
     // Exploder — slow, modest HP, but bursts AOE on death. Punishes
     // bunching mobs near the player and "kill everything fast" play.
@@ -753,12 +755,14 @@ function tickWorld(world, dt, intentsById) {
     world._bossWaveWarned = false;
   }
 
-  // Spawn mobs (halved from before — was too dense, was lagging)
+  // Spawn mobs. Tuned down from earlier values — peak spawn was hitting
+  // 7-13 mobs/sec which saturated ENEMY_CAP and created visual mosh-pit
+  // chaos. New cap: ~2.5 mobs/sec at peak intensity.
   world.spawnT -= dt;
   if (world.spawnT <= 0) {
-    const intensity = clamp(world.t / 60, 0.5, 2.0);
-    world.spawnT = rand(0.30, 0.55) / intensity;
-    const burstN = 1 + Math.floor(intensity * 0.5);
+    const intensity = clamp(world.t / 60, 0.5, 1.4);
+    world.spawnT = rand(0.50, 0.85) / intensity;
+    const burstN = 1 + Math.floor(intensity * 0.3);
     for (let i = 0; i < burstN; i++) spawnEnemy(world);
   }
   if (world.enemies.size > ENEMY_CAP) {
@@ -806,26 +810,29 @@ function tickWorld(world, dt, intentsById) {
     const cd = Math.hypot(cdx, cdy) || 1;
     let mx = cdx / cd, my = cdy / cd;
 
-    // Summoner — kites at ~400 px and periodically summons fast minions.
-    // Reverses chase direction when too close so the player has to commit
-    // to the engagement (or get swarmed).
+    // Summoner — kites at ~400 px and periodically summons ONE fast minion.
+    // Earlier version pumped 2 minions every 5-8 s and overflowed the map;
+    // even a single summoner could fill ENEMY_CAP in under a minute. Now:
+    // 1 minion every 9-14 s, and only when we're under 85 % of the cap.
     if (e.kind === 'summoner') {
-      e._summonT = (e._summonT || 5) - dt;
-      if (e._summonT <= 0 && world.enemies.size < ENEMY_CAP - 4) {
-        e._summonT = rand(5, 8);
-        for (let i = 0; i < 2; i++) {
-          const ang = Math.random() * TAU;
-          const m = {
-            id: nid(world),
-            x: e.x + Math.cos(ang) * 30,
-            y: e.y + Math.sin(ang) * 30,
-            r: 9, hp: 8, maxHp: 8, speed: 130, dmg: 6, xp: 1,
-            kind: 'fast', atkRate: 0.4,
-            hitT: 0, atkCd: 0, _dmgAcc: 0, _dmgEmitT: 0,
-          };
-          world.enemies.set(m.id, m);
-        }
+      e._summonT = (e._summonT || 8) - dt;
+      if (e._summonT <= 0 && world.enemies.size < ENEMY_CAP * 0.85) {
+        e._summonT = rand(9, 14);
+        const ang = Math.random() * TAU;
+        const m = {
+          id: nid(world),
+          x: e.x + Math.cos(ang) * 30,
+          y: e.y + Math.sin(ang) * 30,
+          r: 9, hp: 8, maxHp: 8, speed: 130, dmg: 6, xp: 1,
+          kind: 'fast', atkRate: 0.4,
+          hitT: 0, atkCd: 0, _dmgAcc: 0, _dmgEmitT: 0,
+        };
+        world.enemies.set(m.id, m);
         world.events.push({ type: 'summon', x: e.x, y: e.y });
+      } else if (e._summonT <= 0) {
+        // Cap-throttled — recheck shortly. Stops the timer from firing
+        // every tick once we've cleared the cap.
+        e._summonT = 1.5;
       }
       if (cd < 400) { mx = -mx; my = -my; }    // kite away
     }
@@ -1045,7 +1052,10 @@ function cullSnapshot(full, viewerId, vx, vy) {
 function snapshot(world) {
   const players = [];
   for (const p of world.players.values()) {
-    players.push({
+    // Build the base — the always-present fields. Effect timers below
+    // are conditionally added so a clean player isn't shipping six
+    // zero fields per tick × 50 players × 30 Hz.
+    const sp = {
       id: p.id,
       n: p.name,
       a: p.archetype,
@@ -1069,17 +1079,17 @@ function snapshot(world) {
       bz: p.blade.size,
       sp: Math.round(p.spinPhase * 100) / 100,
       ks: p._killCount || 0,
-      kg: Math.round((p.killGlow || 0) * 10) / 10,    // hot aura timer
-      // Power-up timers (seconds remaining). Round to 0.1 s — granularity
-      // is plenty for visual decay rendering.
-      sh: Math.round((p.shieldT || 0) * 10) / 10,
-      bk: Math.round((p.berserkT || 0) * 10) / 10,
-      mg: Math.round((p.magnetT || 0) * 10) / 10,
-      sm: Math.round((p.slowmoT || 0) * 10) / 10,
-      // Dash-execute window (seconds remaining). Used by the client to
-      // render the brief golden afterimage on the player.
-      ex: Math.round((p._executeT || 0) * 10) / 10,
-    });
+    };
+    // Effect timers — only emitted when active. Client treats undefined
+    // as 0 (everything is `if (p.kg > 0)`-style). Saves ~30 bytes/player
+    // /tick × 50 players × 30 Hz = ~45 KB/sec of zero fields.
+    if (p.killGlow > 0) sp.kg = Math.round(p.killGlow * 10) / 10;
+    if (p.shieldT  > 0) sp.sh = Math.round(p.shieldT  * 10) / 10;
+    if (p.berserkT > 0) sp.bk = Math.round(p.berserkT * 10) / 10;
+    if (p.magnetT  > 0) sp.mg = Math.round(p.magnetT  * 10) / 10;
+    if (p.slowmoT  > 0) sp.sm = Math.round(p.slowmoT  * 10) / 10;
+    if (p._executeT > 0) sp.ex = Math.round(p._executeT * 10) / 10;
+    players.push(sp);
   }
   const enemies = [];
   for (const e of world.enemies.values()) {

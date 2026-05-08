@@ -614,20 +614,28 @@ function bumpCombo(x, y) {
   }
 }
 
+// Hard caps + early-return. The earlier splice(0, n) cap was O(n) per
+// overflow which fired every frame during heavy combat (boss waves, kill
+// chains) — that's the "dmg lag" people felt. Now: drop new particles
+// silently when the array is full. Visually the burst pile-up gracefully
+// degrades; perf stays flat.
+const PARTICLE_CAP = 180;
+const FLOAT_CAP = 28;
 function burst(x,y,color,n,spd){
-  // Hard cap — a kill streak with multiple champion downs can easily push 500+
-  // particles in a frame. Cap at 240 visible at once; oldest trimmed first.
-  if (particles.length > 240) particles.splice(0, particles.length - 200);
-  for(let i=0;i<n;i++){
-    const a=Math.random()*TAU, s=spd*0.3 + Math.random()*spd*0.7;
-    particles.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s,life:0.25+Math.random()*0.3,max:0.55,color});
+  if (particles.length >= PARTICLE_CAP) return;
+  const room = PARTICLE_CAP - particles.length;
+  if (n > room) n = room;
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * TAU, s = spd * 0.3 + Math.random() * spd * 0.7;
+    particles.push({x, y, vx: Math.cos(a)*s, vy: Math.sin(a)*s, life: 0.25 + Math.random()*0.3, max: 0.55, color});
   }
 }
 function spawnRing(x,y,r,color,life){
+  if (rings.length >= 32) return;        // upper bound — visual UX cap
   rings.push({x,y,r0:r*0.4,r1:r*1.6,color,life,max:life});
 }
 function floatText(x,y,text,color,size){
-  if (floats.length > 50) floats.shift();
+  if (floats.length >= FLOAT_CAP) return;  // drop new — old fades naturally
   floats.push({x,y,text,color,size,life:1.1,max:1.1,vy:-50});
 }
 function pushToast(html, cls=''){
@@ -646,7 +654,8 @@ function handleEvent(ev){
     if (ev.id === myId) { shake = Math.max(shake, 0.08); sfx.hurt(); }
   } else if (ev.type === 'dmg') {
     // Damage numbers — only show our own. Event x/y is the blade-tip impact
-    // point, so the number floats from where the blade actually struck.
+    // point. During heavy combat we hit the cap and skip — that's fine,
+    // the visible damage number cluster doesn't need every single hit.
     if (ev.killerId === myId && ev.dmg >= 0.5) {
       const isCrit = ev.dmg >= 8;
       const jx = (Math.random()-0.5) * 8;
@@ -654,11 +663,19 @@ function handleEvent(ev){
       const col = isCrit ? '#ffd455' : '#fff7e0';
       const sz = isCrit ? 16 : 12;
       floatText(ev.x + jx, ev.y - 6, txt, col, sz);
-      burst(ev.x, ev.y, col, isCrit ? 4 : 2, isCrit ? 140 : 90);
+      // Crit always gets a burst; non-crit only when particle pressure is low.
+      if (isCrit) {
+        burst(ev.x, ev.y, col, 3, 140);
+      } else if (particles.length < 80) {
+        burst(ev.x, ev.y, col, 1, 70);
+      }
     }
   } else if (ev.type === 'enemy_killed') {
     const isChampion = ev.kind === 'champion';
-    burst(ev.x, ev.y, isChampion ? '#ffd455' : '#7a7568', isChampion ? 24 : 8, isChampion ? 360 : 180);
+    // Champion always gets the big visual; small mobs scale down when
+    // particles are stacking so chained kills don't snowball pressure.
+    const smallN = particles.length > 100 ? 3 : 6;
+    burst(ev.x, ev.y, isChampion ? '#ffd455' : '#7a7568', isChampion ? 22 : smallN, isChampion ? 360 : 160);
     if (ev.killerId === myId) {
       bumpCombo(ev.x, ev.y);
       if (isChampion) {
@@ -900,11 +917,12 @@ function loop(now){
   applyInterp();
 
   // Client-side visual sparks where my blade LINE overlaps an enemy.
-  // Cosmetic only — server is authoritative for damage. Segment-vs-circle:
-  // we project enemy onto the blade axis, clamp to [innerR, outerR], and
-  // check perpendicular distance. The spark spawns at the closest point on
-  // the segment so the visual lines up with where the blade actually struck.
-  if (lastSnap && lastSnap.me && me && !iAmDead) {
+  // Cosmetic only — server is authoritative for damage AND already emits
+  // dmg events at the impact point. So this is "bridge the 100 ms latency"
+  // sugar; we keep it sparse. Cooldown 0.22 s (was 0.08), 1 particle (was 2),
+  // bail entirely when particle pressure is high. With 4 blades × 5 nearby
+  // mobs the old config was producing 500 particles/sec sustained.
+  if (lastSnap && lastSnap.me && me && !iAmDead && particles.length < 100) {
     const meSnap = lastSnap.me;
     const tBlade = lastSnap.t + (now - snapRecvAt - INTERP_DELAY_MS) / 1000;
     const innerR = pBladeInner(meSnap);
@@ -923,9 +941,9 @@ function loop(now){
         const rr = bs + e.r;
         if (px2 * px2 + py2 * py2 < rr * rr) {
           const key = i + '_' + e.id;
-          if ((bladeSparkT.get(key) || 0) + 0.08 < tBlade) {
+          if ((bladeSparkT.get(key) || 0) + 0.22 < tBlade) {
             bladeSparkT.set(key, tBlade);
-            burst(cx, cy, '#fff7e0', 2, 80);
+            burst(cx, cy, '#fff7e0', 1, 60);
           }
         }
       }
