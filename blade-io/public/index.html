@@ -542,6 +542,16 @@ const sfx = {
   shrine:     () => { [392, 523].forEach((f,i)=>setTimeout(()=>_tone(f,0.25,'sine',0.07), i*70)); },
   augment:    () => _tone(1100, 0.18, 'triangle', 0.06),
   hurt:       () => _tone(150 + Math.random()*40, 0.08, 'square', 0.04),
+  // Each powerup gets its own auditory signature.
+  pwShield:   () => { [659, 880, 1175].forEach((f,i)=>setTimeout(()=>_tone(f,0.2,'sine',0.07), i*40)); },
+  pwBerserk:  () => { _sweep(440, 880, 0.35, 'sawtooth', 0.10); _tone(220, 0.4, 'square', 0.05); },
+  pwMagnet:   () => { _sweep(880, 1760, 0.25, 'triangle', 0.08); },
+  pwSlowmo:   () => { _sweep(880, 220, 0.6, 'sine', 0.09); },
+  pwSpawn:    () => _tone(1320, 0.12, 'sine', 0.04),
+  // Combat flourishes
+  execute:    () => { _tone(1568, 0.05, 'square', 0.08); setTimeout(()=>_tone(2093, 0.12, 'triangle', 0.07), 30); },
+  explode:    () => { _sweep(160, 50, 0.45, 'sawtooth', 0.13); _noise(0.25, 0.10, 600); },
+  summon:     () => { _tone(98, 0.35, 'sawtooth', 0.07); _tone(196, 0.3, 'sawtooth', 0.05); },
 };
 function toggleMute(){
   _muted = !_muted;
@@ -717,6 +727,44 @@ function handleEvent(ev){
       pushToast(`Got <b>${escapeHtml(ev.name)}</b>`, 'kill');
       sfx.augment();
     }
+  } else if (ev.type === 'powerup_spawn') {
+    spawnRing(ev.x, ev.y, 50, '#ffd455', 0.55);
+    sfx.pwSpawn();
+  } else if (ev.type === 'powerup_pickup') {
+    const colByKind = { shield:'#ffd455', berserk:'#d94a5e', magnet:'#3a8db5', slowmo:'#8a5b9c' };
+    const labelByKind = { shield:'SHIELD', berserk:'BERSERK', magnet:'MAGNET+', slowmo:'SLOW-MO' };
+    const c = colByKind[ev.kind] || '#fff';
+    spawnRing(ev.x, ev.y, 90, c, 0.7);
+    spawnRing(ev.x, ev.y, 50, c, 0.5);
+    burst(ev.x, ev.y, c, 22, 280);
+    if (ev.playerId === myId) {
+      floatText(ev.x, ev.y - 40, labelByKind[ev.kind] || ev.kind.toUpperCase(), c, 24);
+      shake = Math.max(shake, 0.18);
+      // Kind-specific audio cue.
+      if (ev.kind === 'shield')  sfx.pwShield();
+      else if (ev.kind === 'berserk') sfx.pwBerserk();
+      else if (ev.kind === 'magnet')  sfx.pwMagnet();
+      else if (ev.kind === 'slowmo')  sfx.pwSlowmo();
+    }
+  } else if (ev.type === 'execute') {
+    // Dash-execute: golden flash + clang. Only my own.
+    if (ev.killerId === myId) {
+      spawnRing(ev.x, ev.y, 70, '#ffd455', 0.45);
+      burst(ev.x, ev.y, '#ffd455', 14, 240);
+      floatText(ev.x, ev.y - 28, 'EXECUTE', '#ffd455', 20);
+      shake = Math.max(shake, 0.2);
+      sfx.execute();
+    }
+  } else if (ev.type === 'explode') {
+    // Exploder death blast — visible to all, hurts whoever's near.
+    spawnRing(ev.x, ev.y, ev.r * 2, '#e09f3e', 0.45);
+    spawnRing(ev.x, ev.y, ev.r, '#d94a5e', 0.35);
+    burst(ev.x, ev.y, '#e09f3e', 30, 340);
+    sfx.explode();
+  } else if (ev.type === 'summon') {
+    spawnRing(ev.x, ev.y, 40, '#8a5b9c', 0.45);
+    burst(ev.x, ev.y, '#8a5b9c', 10, 160);
+    sfx.summon();
   }
 }
 
@@ -988,6 +1036,47 @@ function render(){
     ctx.shadowBlur=0;
   }
 
+  // power-up orbs — pulsing diamonds with kind-specific color and inner glyph.
+  if (lastSnap.powerups) {
+    const pwCol = { shield:'#ffd455', berserk:'#d94a5e', magnet:'#3a8db5', slowmo:'#8a5b9c' };
+    const pwGlyph = { shield:'S', berserk:'B', magnet:'M', slowmo:'T' };
+    for (const pu of lastSnap.powerups) {
+      if (pu.x < vx0 - 60 || pu.x > vx1 + 60 || pu.y < vy0 - 60 || pu.y > vy1 + 60) continue;
+      const c = pwCol[pu.k] || '#fff';
+      const fading = pu.l < 5;
+      const blink = fading && Math.floor(performance.now() / 120) % 2 === 0;
+      const pulse = 1 + 0.22 * Math.sin(performance.now() / 180);
+      ctx.save();
+      ctx.translate(pu.x, pu.y);
+      // Outer aura.
+      ctx.strokeStyle = c;
+      ctx.lineWidth = 2;
+      ctx.setLineDash([5, 5]);
+      ctx.lineDashOffset = -performance.now() / 80;
+      ctx.beginPath(); ctx.arc(0, 0, 28 * pulse, 0, TAU); ctx.stroke();
+      ctx.setLineDash([]);
+      if (!blink) {
+        // Diamond body.
+        ctx.rotate(performance.now() / 600);
+        ctx.fillStyle = c;
+        ctx.shadowColor = c;
+        ctx.shadowBlur = 16;
+        const r = 18 * pulse;
+        ctx.beginPath();
+        ctx.moveTo(0, -r); ctx.lineTo(r, 0); ctx.lineTo(0, r); ctx.lineTo(-r, 0);
+        ctx.closePath(); ctx.fill();
+        ctx.shadowBlur = 0;
+        // Glyph in the center.
+        ctx.rotate(-performance.now() / 600);   // counter-rotate so glyph stays upright
+        ctx.fillStyle = '#fbf6e8';
+        ctx.font = "700 14px Space Grotesk, sans-serif";
+        ctx.textAlign = 'center';
+        ctx.fillText(pwGlyph[pu.k] || '?', 0, 5);
+      }
+      ctx.restore();
+    }
+  }
+
   // augment orbs (level-up pickups in world)
   if (lastSnap.augments) {
     for (const a of lastSnap.augments) {
@@ -1058,16 +1147,47 @@ function render(){
       }
       ctx.closePath(); ctx.fill();
     } else {
-      ctx.fillStyle = color;
-      ctx.shadowColor=color; ctx.shadowBlur=4;
-      if (e.k==='fast'){
+      // Per-kind body. Summoner = hexagon, Exploder = pulsing orange disc,
+      // Tank = square, Fast = diamond, Grunt = circle.
+      const kindCol = e.k === 'summoner' ? '#8a5b9c'
+                    : e.k === 'exploder' ? '#e09f3e'
+                    : color;
+      ctx.fillStyle = kindCol;
+      ctx.shadowColor = kindCol; ctx.shadowBlur = 4;
+      if (e.k === 'fast') {
         ctx.beginPath(); ctx.moveTo(0,-e.r); ctx.lineTo(e.r,0); ctx.lineTo(0,e.r); ctx.lineTo(-e.r,0); ctx.closePath(); ctx.fill();
-      } else if (e.k==='tank'){
+      } else if (e.k === 'tank') {
         ctx.fillRect(-e.r,-e.r,e.r*2,e.r*2);
-        ctx.strokeStyle='rgba(0,0,0,.2)'; ctx.lineWidth=2;
+        ctx.strokeStyle = 'rgba(0,0,0,.2)'; ctx.lineWidth = 2;
         ctx.strokeRect(-e.r+3,-e.r+3,e.r*2-6,e.r*2-6);
+      } else if (e.k === 'summoner') {
+        // Hexagon, slowly rotating, dark inner core.
+        ctx.beginPath();
+        const rot = performance.now() / 1500;
+        for (let h = 0; h < 6; h++) {
+          const a = rot + h * TAU / 6;
+          const x = Math.cos(a) * e.r, y = Math.sin(a) * e.r;
+          if (h === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.closePath(); ctx.fill();
+        ctx.fillStyle = '#1a1d24';
+        ctx.beginPath(); ctx.arc(0, 0, e.r * 0.45, 0, TAU); ctx.fill();
+      } else if (e.k === 'exploder') {
+        // Pulsing fuse — closer to detonation = brighter.
+        const fuse = 1 + 0.18 * Math.sin(performance.now() / 110);
+        ctx.beginPath(); ctx.arc(0, 0, e.r * fuse, 0, TAU); ctx.fill();
+        ctx.strokeStyle = '#d94a5e';
+        ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(0, 0, e.r * fuse + 2, 0, TAU); ctx.stroke();
       } else {
         ctx.beginPath(); ctx.arc(0,0,e.r,0,TAU); ctx.fill();
+      }
+      // Danger-zone tint — red sheen on top of the body.
+      if (e.dz) {
+        ctx.shadowBlur = 0;
+        ctx.strokeStyle = 'rgba(217,74,94,.6)';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.arc(0, 0, e.r + 3, 0, TAU); ctx.stroke();
       }
     }
     ctx.shadowBlur=0;
@@ -1200,6 +1320,17 @@ function drawBg(vx0,vy0,vx1,vy1){
   ctx.lineWidth=1.5/cam.zoom;
   ctx.beginPath(); ctx.arc(WORLD.w/2,WORLD.h/2,500,0,TAU); ctx.stroke();
   ctx.beginPath(); ctx.arc(WORLD.w/2,WORLD.h/2,250,0,TAU); ctx.stroke();
+  // Danger zone — pulsing red ring at the heart of the map. Mobs here are
+  // tougher but drop double XP. Visible from anywhere on the map.
+  const dzPulse = 1 + 0.04 * Math.sin(performance.now() / 600);
+  ctx.strokeStyle = 'rgba(217,74,94,.32)';
+  ctx.lineWidth = 6 / cam.zoom;
+  ctx.setLineDash([22 / cam.zoom, 14 / cam.zoom]);
+  ctx.lineDashOffset = -performance.now() / 60;
+  ctx.beginPath(); ctx.arc(WORLD.w/2, WORLD.h/2, 600 * dzPulse, 0, TAU); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = 'rgba(217,74,94,.04)';
+  ctx.beginPath(); ctx.arc(WORLD.w/2, WORLD.h/2, 600, 0, TAU); ctx.fill();
 }
 
 function hexRgb(h){const v=parseInt(h.slice(1),16);return `${(v>>16)&255},${(v>>8)&255},${v&255}`}
@@ -1245,11 +1376,57 @@ function drawPlayer(p){
     ctx.beginPath(); ctx.arc(0, 0, (r + 18) * pulse, 0, TAU); ctx.stroke();
   }
 
+  // Magnet powerup — wide blue ring expanding outward.
+  if (p.mg > 0) {
+    const t = performance.now() / 240;
+    const expand = (Math.sin(t) * 0.5 + 0.5);
+    ctx.strokeStyle = 'rgba(58,141,181,.45)';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(0, 0, r + 16 + expand * 12, 0, TAU); ctx.stroke();
+    ctx.strokeStyle = 'rgba(58,141,181,.20)';
+    ctx.beginPath(); ctx.arc(0, 0, r + 28 + expand * 16, 0, TAU); ctx.stroke();
+  }
+
   // body — single drawImage from cached sprite atlas (5 path ops + shadow → 1 op)
   const sprite = getBodySprite(p.a, isYou);
   const scale = r / SPRITE_R;
   const halfDraw = SPRITE_HALF * scale;
   ctx.drawImage(sprite, -halfDraw, -halfDraw, halfDraw * 2, halfDraw * 2);
+
+  // Shield powerup — golden bubble around the body.
+  if (p.sh > 0) {
+    const intensity = Math.min(1, p.sh / 2);
+    const pulse = 1 + 0.06 * Math.sin(performance.now() / 90);
+    ctx.strokeStyle = `rgba(255,212,85,${0.7 * intensity})`;
+    ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(0, 0, (r + 6) * pulse, 0, TAU); ctx.stroke();
+    ctx.strokeStyle = `rgba(255,212,85,${0.3 * intensity})`;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(0, 0, (r + 14) * pulse, 0, TAU); ctx.stroke();
+  }
+
+  // Berserk powerup — flickering red edge.
+  if (p.bk > 0) {
+    const flicker = 0.5 + 0.5 * Math.random();
+    ctx.strokeStyle = `rgba(217,74,94,${0.65 * flicker})`;
+    ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.arc(0, 0, r + 3, 0, TAU); ctx.stroke();
+  }
+
+  // Slow-mo aura — a faint purple field on the player who triggered it.
+  if (p.sm > 0) {
+    const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 200);
+    ctx.strokeStyle = `rgba(138,91,156,${0.4 + 0.2 * pulse})`;
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(0, 0, r + 22, 0, TAU); ctx.stroke();
+  }
+
+  // Dash-execute window — brief golden afterimage on the body.
+  if (p.ex > 0) {
+    ctx.strokeStyle = `rgba(255,212,85,${0.7 * (p.ex / 0.6)})`;
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(0, 0, r + 4, 0, TAU); ctx.stroke();
+  }
   ctx.restore();
 
   // Blades are LINES extending out from the body. Each blade is a tapered

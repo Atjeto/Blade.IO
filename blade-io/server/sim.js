@@ -27,6 +27,29 @@ const BOSS_WAVE_TELEGRAPH = 3;   // s warning before champs spawn
 // Visible signal to everyone else that you just took a kill.
 const KILL_GLOW_S = 8;
 
+// Power-ups — rare floating buffs that spawn every POWERUP_INTERVAL_*.
+// Pick up by walking over. Effects last POWERUP_DURATIONS[type] seconds.
+const POWERUP_LIFE = 60;             // seconds before despawn
+const POWERUP_INTERVAL_MIN = 25;
+const POWERUP_INTERVAL_MAX = 40;
+const POWERUP_CAP = 3;
+const POWERUP_TYPES = ['shield', 'berserk', 'magnet', 'slowmo'];
+const POWERUP_DURATIONS = { shield: 4, berserk: 5, magnet: 8, slowmo: 3 };
+
+// Dash-execute: a kill within EXECUTE_WINDOW seconds of dashing earns
+// a bonus XP gem + dramatic event. Rewards aggressive engage-dashing.
+const EXECUTE_WINDOW = 0.6;
+
+// Center "danger zone" — 30% of mobs spawn in a 600 px ring around the
+// world center. Mobs in zone are tougher (HP×1.4, dmg×1.2) but drop
+// double XP. Risk/reward heart of the map.
+const DANGER_ZONE_R = 600;
+const DANGER_ZONE_R2 = DANGER_ZONE_R * DANGER_ZONE_R;
+function inDangerZone(x, y) {
+  const dx = x - WORLD.w / 2, dy = y - WORLD.h / 2;
+  return dx * dx + dy * dy < DANGER_ZONE_R2;
+}
+
 const ARCHETYPES = {
   reaver: {
     name: 'REAVER',
@@ -102,6 +125,12 @@ function makePlayer({ id, x, y, name, archetype = 'dervish', isBot = false }) {
     _respawnT: 0,
     _aiTargetT: 0, _aiTargetX: x, _aiTargetY: y,
     _killCount: 0,
+    // Power-up effect timers (seconds remaining).
+    shieldT: 0, berserkT: 0, magnetT: 0, slowmoT: 0,
+    // Dash-execute window — set when dashing, ticks down. Kills while >0
+    // count as executes.
+    _executeT: 0,
+    killGlow: 0,
   };
   ARCHETYPES[archetype].init(p);
   return p;
@@ -132,6 +161,7 @@ function newWorld() {
     enemies: new Map(),         // id -> enemy
     gems: new Map(),            // id -> gem
     augments: new Map(),        // id -> augment orb (level-up pickup)
+    powerups: new Map(),        // id -> powerup orb (shield/berserk/magnet/slowmo)
     shrines: [],                // fixed list
     spawnT: 0,
     events: [],                 // transient events (kills, hits) sent each tick
@@ -163,7 +193,13 @@ function spawnEnemy(world) {
   const roll = Math.random();
   let ax, ay;
   const players = [...world.players.values()].filter(p => !p.dead);
-  if (roll < 0.35 || players.length === 0) {
+  // 30% of spawns happen inside the danger zone — concentration of risk
+  // and reward at the heart of the map.
+  if (roll < 0.30) {
+    const ang = Math.random() * TAU, dist = Math.random() * (DANGER_ZONE_R - 60);
+    ax = WORLD.w / 2 + Math.cos(ang) * dist;
+    ay = WORLD.h / 2 + Math.sin(ang) * dist;
+  } else if (roll < 0.50 || players.length === 0) {
     ax = rand(150, WORLD.w - 150);
     ay = rand(150, WORLD.h - 150);
   } else {
@@ -178,12 +214,28 @@ function spawnEnemy(world) {
   if (wave >= 3 && tier < 0.04) {
     // Champion: rare elite mob — fat HP, fat reward. Drops a cluster of gems.
     e = { x: ax, y: ay, r: 28, hp: 180 + wave*14, maxHp: 180 + wave*14, speed: 55 + wave*0.8, dmg: 22, xp: 18, kind: 'champion', atkRate: 0.85 };
-  } else if (wave >= 4 && tier < 0.12) {
+  } else if (wave >= 5 && tier < 0.08) {
+    // Summoner — kites, periodically spawns fast minions. Forces players
+    // to commit to the chase or risk being swarmed.
+    e = { x: ax, y: ay, r: 18, hp: 60 + wave*5, maxHp: 60 + wave*5, speed: 35, dmg: 14, xp: 5, kind: 'summoner', atkRate: 1.2, _summonT: rand(3, 5) };
+  } else if (wave >= 4 && tier < 0.14) {
+    // Exploder — slow, modest HP, but bursts AOE on death. Punishes
+    // bunching mobs near the player and "kill everything fast" play.
+    e = { x: ax, y: ay, r: 15, hp: 30 + wave*3, maxHp: 30 + wave*3, speed: 75, dmg: 18, xp: 3, kind: 'exploder', atkRate: 0.6 };
+  } else if (wave >= 4 && tier < 0.20) {
     e = { x: ax, y: ay, r: 22, hp: 50 + wave*7, maxHp: 50 + wave*7, speed: 60 + wave*1.2, dmg: 18, xp: 5, kind: 'tank', atkRate: 0.7 };
-  } else if (wave >= 2 && tier < 0.35) {
+  } else if (wave >= 2 && tier < 0.40) {
     e = { x: ax, y: ay, r: 9, hp: 14 + wave*2, maxHp: 14 + wave*2, speed: 140 + wave*3, dmg: 8, xp: 2, kind: 'fast', atkRate: 0.4 };
   } else {
     e = { x: ax, y: ay, r: 13, hp: 22 + wave*2.5, maxHp: 22 + wave*2.5, speed: 75 + wave*1.5, dmg: 10, xp: 1, kind: 'grunt', atkRate: 0.55 };
+  }
+  // Danger-zone enemies are tougher (×1.4 HP, ×1.2 dmg) but drop double XP.
+  if (inDangerZone(e.x, e.y)) {
+    e.hp = Math.ceil(e.hp * 1.4);
+    e.maxHp = e.hp;
+    e.dmg = Math.ceil(e.dmg * 1.2);
+    e.xp *= 2;
+    e.dz = 1;
   }
   e.id = nid(world); e.hitT = 0; e.atkCd = Math.random() * 0.3;
   e._dmgAcc = 0; e._dmgEmitT = 0;
@@ -227,6 +279,26 @@ function damageEnemy(world, e, dmg, killer, hitX, hitY) {
       const g = { id: nid(world), x: e.x, y: e.y, xp: e.xp, mass: e.xp * 1.0, r: 5, life: GEM_LIFE };
       world.gems.set(g.id, g);
     }
+    // Exploders detonate on death — radial AOE + visual + audio cue.
+    if (e.kind === 'exploder') {
+      const ER = 90;
+      for (const pl of world.players.values()) {
+        if (pl.dead) continue;
+        if (dist2(e.x, e.y, pl.x, pl.y) < ER * ER) {
+          // Killer-of-record is the exploder so the killing player isn't
+          // credited with their own AOE-self-damage.
+          damagePlayer(world, pl, 18, e);
+        }
+      }
+      world.events.push({ type: 'explode', x: e.x, y: e.y, r: ER });
+    }
+    // Dash-execute: kill landed during the execute window after a dash.
+    // Bonus XP gem + dramatic event (golden "EXECUTE" pop on the client).
+    if (killer && killer._executeT > 0 && e.kind !== 'champion') {
+      const bonusG = { id: nid(world), x: e.x, y: e.y, xp: 2, mass: 1.5, r: 6, big: true, life: GEM_LIFE };
+      world.gems.set(bonusG.id, bonusG);
+      world.events.push({ type: 'execute', x: e.x, y: e.y, killerId: killer.id, kind: e.kind });
+    }
     world.events.push({
       type: 'enemy_killed',
       x: e.x, y: e.y,
@@ -240,7 +312,9 @@ function damageEnemy(world, e, dmg, killer, hitX, hitY) {
 }
 
 function damagePlayer(world, p, dmg, source) {
-  if (p.iframes > 0 || p.dead) return;
+  // Shield powerup absorbs hits same as iframes — but we visualise differently
+  // on the client so the player knows which is active.
+  if (p.iframes > 0 || p.shieldT > 0 || p.dead) return;
   p.hp -= dmg;
   world.events.push({ type: 'hit', id: p.id, x: p.x, y: p.y });
   if (p.hp <= 0) {
@@ -291,6 +365,12 @@ function tickPlayer(world, p, dt, intent) {
   if (p.dashCd > 0) p.dashCd -= dt;
   if (p.dashing > 0) p.dashing -= dt;
   if (p.killGlow > 0) p.killGlow = Math.max(0, p.killGlow - dt);
+  // Power-up effect timers — all in seconds remaining.
+  if (p.shieldT > 0)  p.shieldT  = Math.max(0, p.shieldT  - dt);
+  if (p.berserkT > 0) p.berserkT = Math.max(0, p.berserkT - dt);
+  if (p.magnetT > 0)  p.magnetT  = Math.max(0, p.magnetT  - dt);
+  if (p.slowmoT > 0)  p.slowmoT  = Math.max(0, p.slowmoT  - dt);
+  if (p._executeT > 0) p._executeT = Math.max(0, p._executeT - dt);
 
   // Dash request from intent
   if (intent && intent.dash && p.dashCd <= 0 && !p.dead) {
@@ -305,6 +385,9 @@ function tickPlayer(world, p, dt, intent) {
       p.dashing = 0.18;
       p.dashCd = 1.6 * p.dashCdMult;
       p.iframes = Math.max(p.iframes, 0.18);
+      // Open the execute window — kills landed in the next EXECUTE_WINDOW
+      // seconds count as dash-executes (bonus XP + visual flourish).
+      p._executeT = EXECUTE_WINDOW;
       world.events.push({ type: 'dash', id: p.id, x: p.x, y: p.y });
     }
   }
@@ -334,7 +417,9 @@ function tickPlayer(world, p, dt, intent) {
   // orbit ring anymore because the whole ray is the hitbox.
   const b = p.blade;
   const innerR = pBladeInner(p), outerR = pBladeRadius(p);
-  const bs = pBladeSize(p), bdmg = pBladeDmg(p);
+  const bs = pBladeSize(p);
+  // Berserk powerup: +50% blade damage during the buff window.
+  const bdmg = pBladeDmg(p) * (p.berserkT > 0 ? 1.5 : 1);
   for (let i = 0; i < b.count; i++) {
     const ang = (p.isBot ? p.spinPhase : 0) + world.t * b.speed + (i / b.count) * TAU;
     const ux = Math.cos(ang), uy = Math.sin(ang);
@@ -371,11 +456,13 @@ function tickPlayer(world, p, dt, intent) {
     }
   }
 
-  // Gem pickup (with magnet pull)
+  // Gem pickup (with magnet pull). Magnet powerup: 3× range + 1.5× pull.
+  const magnetR = p.magnet * (p.magnetT > 0 ? 3 : 1);
+  const magnetPullMul = p.magnetT > 0 ? 1.5 : 1;
   for (const g of world.gems.values()) {
     const dx = p.x - g.x, dy = p.y - g.y, d = Math.hypot(dx, dy);
-    if (d < p.magnet) {
-      const pull = (1 - d / p.magnet) * 600 + 80;
+    if (d < magnetR) {
+      const pull = ((1 - d / magnetR) * 600 + 80) * magnetPullMul;
       g.x += dx / d * pull * dt;
       g.y += dy / d * pull * dt;
     }
@@ -596,6 +683,36 @@ function tickWorld(world, dt, intentsById) {
     }
   }
 
+  // Player body collision — solid bodies. A small player can no longer
+  // hide INSIDE a bigger one (which kept them out of blade reach). Mass-
+  // weighted overlap resolution: lighter player gets pushed more.
+  for (const p of world.players.values()) {
+    if (p.dead) continue;
+    for (const o of world.players.values()) {
+      if (o.id <= p.id || o.dead) continue;     // each pair processed once
+      const dx = o.x - p.x, dy = o.y - p.y;
+      const d2 = dx * dx + dy * dy;
+      const pR = pRadius(p), oR = pRadius(o);
+      const minD = pR + oR;
+      if (d2 > 0 && d2 < minD * minD) {
+        const d = Math.sqrt(d2);
+        const overlap = minD - d;
+        const total = p.mass + o.mass;
+        const pShare = o.mass / total;       // p moves a share proportional to o's mass
+        const oShare = p.mass / total;
+        const ux = dx / d, uy = dy / d;
+        p.x -= ux * overlap * pShare;
+        p.y -= uy * overlap * pShare;
+        o.x += ux * overlap * oShare;
+        o.y += uy * overlap * oShare;
+        p.x = clamp(p.x, pR, WORLD.w - pR);
+        p.y = clamp(p.y, pR, WORLD.h - pR);
+        o.x = clamp(o.x, oR, WORLD.w - oR);
+        o.y = clamp(o.y, oR, WORLD.h - oR);
+      }
+    }
+  }
+
   // Boss waves — every BOSS_WAVE_INTERVAL seconds, a swarm of champions
   // descends. We emit a `boss_wave_warning` event BOSS_WAVE_TELEGRAPH
   // seconds before so the client can ramp tension (toast + dramatic audio).
@@ -689,6 +806,30 @@ function tickWorld(world, dt, intentsById) {
     const cd = Math.hypot(cdx, cdy) || 1;
     let mx = cdx / cd, my = cdy / cd;
 
+    // Summoner — kites at ~400 px and periodically summons fast minions.
+    // Reverses chase direction when too close so the player has to commit
+    // to the engagement (or get swarmed).
+    if (e.kind === 'summoner') {
+      e._summonT = (e._summonT || 5) - dt;
+      if (e._summonT <= 0 && world.enemies.size < ENEMY_CAP - 4) {
+        e._summonT = rand(5, 8);
+        for (let i = 0; i < 2; i++) {
+          const ang = Math.random() * TAU;
+          const m = {
+            id: nid(world),
+            x: e.x + Math.cos(ang) * 30,
+            y: e.y + Math.sin(ang) * 30,
+            r: 9, hp: 8, maxHp: 8, speed: 130, dmg: 6, xp: 1,
+            kind: 'fast', atkRate: 0.4,
+            hitT: 0, atkCd: 0, _dmgAcc: 0, _dmgEmitT: 0,
+          };
+          world.enemies.set(m.id, m);
+        }
+        world.events.push({ type: 'summon', x: e.x, y: e.y });
+      }
+      if (cd < 400) { mx = -mx; my = -my; }    // kite away
+    }
+
     // Separation: 3x3 neighborhood
     const ecx = Math.floor(e.x / SEP_CELL), ecy = Math.floor(e.y / SEP_CELL);
     let sx = 0, sy = 0;
@@ -717,8 +858,10 @@ function tickWorld(world, dt, intentsById) {
     mx = mx + sx * 0.45;
     my = my + sy * 0.45;
     const ml = Math.hypot(mx, my) || 1;
-    e.x += (mx / ml) * e.speed * dt;
-    e.y += (my / ml) * e.speed * dt;
+    // Slow-mo powerup: enemies near a buffed player move at half speed.
+    const speedMul = nearest.slowmoT > 0 ? 0.5 : 1;
+    e.x += (mx / ml) * e.speed * speedMul * dt;
+    e.y += (my / ml) * e.speed * speedMul * dt;
 
     const r2 = pRadius(nearest) + e.r;
     if (e.atkCd <= 0 && dist2(nearest.x, nearest.y, e.x, e.y) < r2 * r2) {
@@ -792,6 +935,45 @@ function tickWorld(world, dt, intentsById) {
   }
 
 
+  // Power-up orbs — rare floating buffs. Spawn timer ticks; when it fires
+  // and we're under the cap, pop one in at a random map location.
+  world._powerupT = (world._powerupT != null ? world._powerupT : POWERUP_INTERVAL_MIN) - dt;
+  if (world._powerupT <= 0) {
+    if (world.powerups.size < POWERUP_CAP) {
+      const type = POWERUP_TYPES[Math.floor(Math.random() * POWERUP_TYPES.length)];
+      const px = rand(200, WORLD.w - 200);
+      const py = rand(200, WORLD.h - 200);
+      const pu = { id: nid(world), x: px, y: py, r: 22, type, life: POWERUP_LIFE };
+      world.powerups.set(pu.id, pu);
+      world.events.push({ type: 'powerup_spawn', x: px, y: py, kind: type });
+    }
+    world._powerupT = rand(POWERUP_INTERVAL_MIN, POWERUP_INTERVAL_MAX);
+  }
+  // Decay + pickup pass.
+  for (const pu of world.powerups.values()) {
+    pu.life -= dt;
+    if (pu.life <= 0) { world.powerups.delete(pu.id); continue; }
+    for (const ply of world.players.values()) {
+      if (ply.dead) continue;
+      const rr = pRadius(ply) + pu.r;
+      if (dist2(ply.x, ply.y, pu.x, pu.y) < rr * rr) {
+        const dur = POWERUP_DURATIONS[pu.type] || 5;
+        // Buffs stack up to their max duration — picking up two shields in
+        // a row gives you the longer remaining timer, not 2× the duration.
+        if      (pu.type === 'shield')  ply.shieldT  = Math.max(ply.shieldT,  dur);
+        else if (pu.type === 'berserk') ply.berserkT = Math.max(ply.berserkT, dur);
+        else if (pu.type === 'magnet')  ply.magnetT  = Math.max(ply.magnetT,  dur);
+        else if (pu.type === 'slowmo')  ply.slowmoT  = Math.max(ply.slowmoT,  dur);
+        world.events.push({
+          type: 'powerup_pickup',
+          x: pu.x, y: pu.y, playerId: ply.id, kind: pu.type,
+        });
+        world.powerups.delete(pu.id);
+        break;
+      }
+    }
+  }
+
   for (const s of world.shrines) {
     if (s.charge < 1) {
       s.cd -= dt;
@@ -843,10 +1025,16 @@ function cullSnapshot(full, viewerId, vx, vy) {
     const dx = a.x - vx, dy = a.y - vy;
     if (dx * dx + dy * dy < VIEW_CULL_R2) augments.push(a);
   }
+  const powerups = [];
+  for (let i = 0; i < full.powerups.length; i++) {
+    const pu = full.powerups[i];
+    const dx = pu.x - vx, dy = pu.y - vy;
+    if (dx * dx + dy * dy < VIEW_CULL_R2) powerups.push(pu);
+  }
   return {
     t: full.t,
     players: full.players,    // keep all — needed for leaderboard + minimap
-    enemies, gems, augments,
+    enemies, gems, augments, powerups,
     shrines: full.shrines,
     events: full.events,
   };
@@ -882,6 +1070,15 @@ function snapshot(world) {
       sp: Math.round(p.spinPhase * 100) / 100,
       ks: p._killCount || 0,
       kg: Math.round((p.killGlow || 0) * 10) / 10,    // hot aura timer
+      // Power-up timers (seconds remaining). Round to 0.1 s — granularity
+      // is plenty for visual decay rendering.
+      sh: Math.round((p.shieldT || 0) * 10) / 10,
+      bk: Math.round((p.berserkT || 0) * 10) / 10,
+      mg: Math.round((p.magnetT || 0) * 10) / 10,
+      sm: Math.round((p.slowmoT || 0) * 10) / 10,
+      // Dash-execute window (seconds remaining). Used by the client to
+      // render the brief golden afterimage on the player.
+      ex: Math.round((p._executeT || 0) * 10) / 10,
     });
   }
   const enemies = [];
@@ -890,6 +1087,7 @@ function snapshot(world) {
       id: e.id,
       x: Math.round(e.x), y: Math.round(e.y),
       r: e.r, h: Math.ceil(e.hp), mh: e.maxHp, k: e.kind,
+      dz: e.dz ? 1 : 0,                        // danger-zone tint flag
     });
   }
   const gems = [];
@@ -908,10 +1106,19 @@ function snapshot(world) {
     });
   }
   const shrines = world.shrines.map(s => ({ id: s.id, x: s.x, y: s.y, c: s.charge >= 1 ? 1 : 0, cd: Math.round(s.cd * 10) / 10 }));
+  const powerups = [];
+  for (const pu of world.powerups.values()) {
+    powerups.push({
+      id: pu.id,
+      x: Math.round(pu.x), y: Math.round(pu.y),
+      k: pu.type,
+      l: Math.round(pu.life * 10) / 10,
+    });
+  }
   return {
     // Precise enough to drive client-side blade-angle sync without visible jitter.
     t: Math.round(world.t * 1000) / 1000,
-    players, enemies, gems, augments, shrines,
+    players, enemies, gems, augments, powerups, shrines,
     events: world.events.slice(),
   };
 }
