@@ -94,8 +94,16 @@ function makePlayer({ id, x, y, name, archetype = 'dervish', isBot = false }) {
 
 // ---------- Mass-derived getters ----------
 const pRadius = p => 14 + Math.sqrt(p.mass) * 1.6;
-const pSpeed  = p => Math.max(120, (260 - Math.sqrt(p.mass) * 7)) * p.speedMult;
+// Speed floor lifted to 140 so fast mobs (140 + wave*3) don't outpace big
+// players. The line-blade now covers the body-edge gap, but the player still
+// needs to be able to disengage occasionally.
+const pSpeed  = p => Math.max(140, (260 - Math.sqrt(p.mass) * 7)) * p.speedMult;
+// pBladeRadius is the OUTER tip distance — the far end of the blade line.
+// pBladeInner is where the blade starts (just outside the body), so the line
+// covers every radius from body edge out to the tip. Mobs that get close
+// can no longer slip "inside the orbit" — the line is already there.
 const pBladeRadius = p => p.blade.radius + Math.sqrt(p.mass) * 1.8;
+const pBladeInner  = p => pRadius(p) + 2;
 const pBladeSize   = p => p.blade.size   + Math.sqrt(p.mass) * 0.5;
 const pBladeDmg    = p => p.blade.dmg    * p.dmgMult;
 const pView        = p => 1 + Math.min(0.7, p.mass * 0.0022);
@@ -295,26 +303,46 @@ function tickPlayer(world, p, dt, intent) {
   p.x = clamp(p.x + p.vx * dt, pRadius(p), WORLD.w - pRadius(p));
   p.y = clamp(p.y + p.vy * dt, pRadius(p), WORLD.h - pRadius(p));
 
-  // Blades hit enemies + other players
+  // Blades hit enemies + other players via segment-vs-circle. Each blade is a
+  // LINE from innerR to outerR along its rotating angle — anything within the
+  // line's perpendicular tolerance (bs + target.r) gets hit, regardless of
+  // where along the line. This is the difference between "magnetic dot
+  // orbiting" and "sword sweeping": close enemies can't slip past a fixed
+  // orbit ring anymore because the whole ray is the hitbox.
   const b = p.blade;
-  const br = pBladeRadius(p), bs = pBladeSize(p), bdmg = pBladeDmg(p);
+  const innerR = pBladeInner(p), outerR = pBladeRadius(p);
+  const bs = pBladeSize(p), bdmg = pBladeDmg(p);
   for (let i = 0; i < b.count; i++) {
     const ang = (p.isBot ? p.spinPhase : 0) + world.t * b.speed + (i / b.count) * TAU;
-    const bx = p.x + Math.cos(ang) * br;
-    const by = p.y + Math.sin(ang) * br;
+    const ux = Math.cos(ang), uy = Math.sin(ang);
     for (const e of world.enemies.values()) {
+      const dxp = e.x - p.x, dyp = e.y - p.y;
+      const proj = dxp * ux + dyp * uy;          // distance along blade axis
+      if (proj < innerR - bs || proj > outerR + bs) continue;
+      const tProj = proj < innerR ? innerR : (proj > outerR ? outerR : proj);
+      const cx = p.x + ux * tProj, cy = p.y + uy * tProj;
+      const px2 = e.x - cx, py2 = e.y - cy;
       const rr = bs + e.r;
-      if (dist2(bx, by, e.x, e.y) < rr * rr) {
+      if (px2 * px2 + py2 * py2 < rr * rr) {
+        // Hit point is the closest point on the segment (not enemy center).
+        damageEnemy(world, e, bdmg * dt * 8, p, cx, cy);
+        // Knockback radially out from the player so blades sweep enemies
+        // outward, never trapping them against the body.
         const ddx = e.x - p.x, ddy = e.y - p.y, dd = Math.hypot(ddx, ddy) || 1;
-        damageEnemy(world, e, bdmg * dt * 8, p, bx, by);
         e.x += ddx / dd * 4 * dt * 60 * 0.016;
         e.y += ddy / dd * 4 * dt * 60 * 0.016;
       }
     }
     for (const o of world.players.values()) {
       if (o.id === p.id || o.dead) continue;
+      const dxp = o.x - p.x, dyp = o.y - p.y;
+      const proj = dxp * ux + dyp * uy;
+      if (proj < innerR - bs || proj > outerR + bs) continue;
+      const tProj = proj < innerR ? innerR : (proj > outerR ? outerR : proj);
+      const cx = p.x + ux * tProj, cy = p.y + uy * tProj;
+      const px2 = o.x - cx, py2 = o.y - cy;
       const rr = bs + pRadius(o);
-      if (dist2(bx, by, o.x, o.y) < rr * rr) {
+      if (px2 * px2 + py2 * py2 < rr * rr) {
         damagePlayer(world, o, bdmg * dt * 8, p);
       }
     }
@@ -434,9 +462,10 @@ function botIntent(world, b, dt) {
     dx = shrine.x - b.x; dy = shrine.y - b.y;
     b._aiTargetId = -1;
   } else if (target) {
-    // Orbit at our blade-radius so the blade tip passes through target each
-    // rotation. Spiral approach (mixes radial pull + tangential orbit) so the
-    // bot doesn't beeline straight in — it swirls into combat range.
+    // Orbit at ~70 % of outer reach so target sits in the MIDDLE of the blade
+    // line (not at the tip). With line-blades, the further inside the segment
+    // the target is, the more frequently the rotating line passes through it
+    // — every rotation guaranteed contact instead of a near-miss at the tip.
     if (b._aiTargetId !== target.id) {
       b._aiTargetId = target.id;
       b._orbitDir = Math.random() < 0.5 ? 1 : -1;
@@ -444,7 +473,10 @@ function botIntent(world, b, dt) {
     if (Math.random() < 0.004) b._orbitDir = -b._orbitDir; // occasional juke
     const px = target.x - b.x, py = target.y - b.y;
     const pd = Math.hypot(px, py) || 1;
-    const optimalDist = pBladeRadius(b);
+    const optimalDist = Math.max(
+      pRadius(b) + pRadius(target) + 6,
+      pBladeRadius(b) * 0.7
+    );
     const radialErr = pd - optimalDist;
     const radial = Math.tanh(radialErr / 150); // gentler — spiral in, never rush
     const ux = px / pd, uy = py / pd;
@@ -744,6 +776,6 @@ module.exports = {
   WORLD, ARCHETYPES, UPGRADES, TAU,
   newWorld, initWorld, makePlayer, nid,
   tickWorld, tickPlayer, botIntent, generateLevelUpOptions, applyUpgrade,
-  pRadius, pSpeed, pBladeRadius, pBladeSize, pBladeDmg, pView,
+  pRadius, pSpeed, pBladeRadius, pBladeInner, pBladeSize, pBladeDmg, pView,
   snapshot,
 };

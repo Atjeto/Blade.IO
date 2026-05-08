@@ -506,6 +506,9 @@ function bumpCombo(x, y) {
 }
 
 function burst(x,y,color,n,spd){
+  // Hard cap — a kill streak with multiple champion downs can easily push 500+
+  // particles in a frame. Cap at 240 visible at once; oldest trimmed first.
+  if (particles.length > 240) particles.splice(0, particles.length - 200);
   for(let i=0;i<n;i++){
     const a=Math.random()*TAU, s=spd*0.3 + Math.random()*spd*0.7;
     particles.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s,life:0.25+Math.random()*0.3,max:0.55,color});
@@ -607,10 +610,11 @@ function escapeHtml(s){return String(s||'').replace(/[&<>"']/g, c=>({'&':'&amp;'
 
 // ===== Render-side helpers (kept identical to single-player) =====
 function pRadius(p){return 14 + Math.sqrt(p.m)*1.6}
-function pBladeRadius(p){return p.br + Math.sqrt(p.m)*1.8}
+function pBladeRadius(p){return p.br + Math.sqrt(p.m)*1.8}    // outer tip
+function pBladeInner(p){return pRadius(p) + 2}                 // line start
 function pBladeSize(p){return p.bz + Math.sqrt(p.m)*0.5}
 function pView(p){return 1 + Math.min(0.7, p.m*0.0022)}
-function pSpeed(p){return Math.max(120, (260 - Math.sqrt(p.m)*7))}
+function pSpeed(p){return Math.max(140, (260 - Math.sqrt(p.m)*7))}
 
 // Camera
 const cam = {x: WORLD.w/2, y: WORLD.h/2, zoom: 1, targetZoom: 1};
@@ -639,24 +643,42 @@ function localPredict(dt){
 
 // Snapshot interpolation: render at (now - 100ms) so we have buffer.
 // Writes _rx/_ry in place on each entity — no per-frame allocation.
+// When the next snap is delayed, we extrapolate up to 80 ms past the latest
+// snap using the prev→last segment velocity. This is the difference between
+// "mob freezes for a frame, then teleports forward" and "mob keeps moving
+// smoothly even when packets are jittery" — the visible stutter user sees.
 const INTERP_DELAY_MS = 100;
+const EXTRAP_CAP_MS = 80;
 function applyInterp(){
   if (!lastSnap) return;
   const renderTime = performance.now() - INTERP_DELAY_MS;
   const span = prevSnap ? (snapRecvAt - prevSnapRecvAt) : 0;
-  const canInterp = prevSnap && span > 0 && renderTime < snapRecvAt;
-  const t = canInterp ? Math.max(0, Math.min(1, (renderTime - prevSnapRecvAt) / span)) : 1;
+  const canInterp = prevSnap && span > 0;
   const prevP = canInterp ? prevSnap.byId : null;
   const prevE = canInterp ? prevSnap.eById : null;
   for (const p of lastSnap.players) {
     const prev = prevP && prevP.get(p.id);
-    if (prev) { p._rx = prev.x + (p.x - prev.x) * t; p._ry = prev.y + (p.y - prev.y) * t; }
-    else { p._rx = p.x; p._ry = p.y; }
+    if (prev && renderTime <= snapRecvAt) {
+      const t = Math.max(0, Math.min(1, (renderTime - prevSnapRecvAt) / span));
+      p._rx = prev.x + (p.x - prev.x) * t;
+      p._ry = prev.y + (p.y - prev.y) * t;
+    } else if (prev) {
+      const overshoot = Math.min(EXTRAP_CAP_MS, renderTime - snapRecvAt);
+      p._rx = p.x + (p.x - prev.x) / span * overshoot;
+      p._ry = p.y + (p.y - prev.y) / span * overshoot;
+    } else { p._rx = p.x; p._ry = p.y; }
   }
   for (const e of lastSnap.enemies) {
     const prev = prevE && prevE.get(e.id);
-    if (prev) { e._rx = prev.x + (e.x - prev.x) * t; e._ry = prev.y + (e.y - prev.y) * t; }
-    else { e._rx = e.x; e._ry = e.y; }
+    if (prev && renderTime <= snapRecvAt) {
+      const t = Math.max(0, Math.min(1, (renderTime - prevSnapRecvAt) / span));
+      e._rx = prev.x + (e.x - prev.x) * t;
+      e._ry = prev.y + (e.y - prev.y) * t;
+    } else if (prev) {
+      const overshoot = Math.min(EXTRAP_CAP_MS, renderTime - snapRecvAt);
+      e._rx = e.x + (e.x - prev.x) / span * overshoot;
+      e._ry = e.y + (e.y - prev.y) / span * overshoot;
+    } else { e._rx = e.x; e._ry = e.y; }
   }
   // Local player overrides interpolated position with prediction.
   if (lastSnap.me && me && !iAmDead) {
@@ -682,26 +704,33 @@ function loop(now){
   // interpolate other entities once per frame (writes _rx/_ry in place)
   applyInterp();
 
-  // Client-side visual sparks where my blades visibly overlap an enemy.
-  // Cosmetic only — server is authoritative for damage. This bridges the
-  // ~100 ms latency gap so the spark fires at the visible blade tip.
+  // Client-side visual sparks where my blade LINE overlaps an enemy.
+  // Cosmetic only — server is authoritative for damage. Segment-vs-circle:
+  // we project enemy onto the blade axis, clamp to [innerR, outerR], and
+  // check perpendicular distance. The spark spawns at the closest point on
+  // the segment so the visual lines up with where the blade actually struck.
   if (lastSnap && lastSnap.me && me && !iAmDead) {
     const meSnap = lastSnap.me;
     const tBlade = lastSnap.t + (now - snapRecvAt - INTERP_DELAY_MS) / 1000;
-    const br = pBladeRadius(meSnap);
+    const innerR = pBladeInner(meSnap);
+    const outerR = pBladeRadius(meSnap);
     const bs = pBladeSize(meSnap);
     for (let i = 0; i < meSnap.bc; i++) {
       const ang = tBlade * meSnap.bs + (i / meSnap.bc) * TAU;
-      const bx = me.x + Math.cos(ang) * br;
-      const by = me.y + Math.sin(ang) * br;
+      const ux = Math.cos(ang), uy = Math.sin(ang);
       for (const e of lastSnap.enemies) {
+        const dxp = e._rx - me.x, dyp = e._ry - me.y;
+        const proj = dxp * ux + dyp * uy;
+        if (proj < innerR - bs || proj > outerR + bs) continue;
+        const tProj = proj < innerR ? innerR : (proj > outerR ? outerR : proj);
+        const cx = me.x + ux * tProj, cy = me.y + uy * tProj;
+        const px2 = e._rx - cx, py2 = e._ry - cy;
         const rr = bs + e.r;
-        const dx = bx - e._rx, dy = by - e._ry;
-        if (dx*dx + dy*dy < rr * rr) {
+        if (px2 * px2 + py2 * py2 < rr * rr) {
           const key = i + '_' + e.id;
           if ((bladeSparkT[key] || 0) + 0.08 < tBlade) {
             bladeSparkT[key] = tBlade;
-            burst(bx, by, '#fff7e0', 2, 80);
+            burst(cx, cy, '#fff7e0', 2, 80);
           }
         }
       }
@@ -1064,34 +1093,58 @@ function drawPlayer(p){
   ctx.beginPath(); ctx.arc(0,0,r*0.18,0,TAU); ctx.fill();
   ctx.restore();
 
-  // blades — use server clock so visual rotation matches server-side hit detection.
-  // Local player uses "now" (their position is predicted to now); others use the
-  // interp-delayed time to match their displayed (interpolated) position.
+  // Blades are LINES extending out from the body. Each blade is a tapered
+  // sword-shape from innerR to outerR along its rotating angle. As mass /
+  // upgrades grow, outerR extends, the blade visibly stretches further.
+  // Server clock keeps visual rotation synced to authoritative hit detection.
   const tNow = lastSnap.t + (performance.now() - snapRecvAt) / 1000;
-  const t = isYou ? tNow : (tNow - INTERP_DELAY_MS / 1000);
-  const br = pBladeRadius(p), bs = pBladeSize(p);
-  for (let i=0; i<p.bc; i++){
-    const ang = (p.b ? p.sp : 0) + t*p.bs + (i/p.bc)*TAU;
-    const bx = px + Math.cos(ang)*br;
-    const by = py + Math.sin(ang)*br;
-    for (let k=1;k<=3;k++){
-      const a2 = (p.b?p.sp:0) + (t-k*0.012)*p.bs + (i/p.bc)*TAU;
-      const tx=px+Math.cos(a2)*br, ty=py+Math.sin(a2)*br;
-      const alpha = 0.13*(1-k/3);
-      ctx.fillStyle = isYou ? `rgba(42,138,95,${alpha})` : `rgba(${hexRgb(col)},${alpha})`;
-      ctx.beginPath(); ctx.arc(tx,ty,bs*(1-k/5),0,TAU); ctx.fill();
-    }
+  const tB = isYou ? tNow : (tNow - INTERP_DELAY_MS / 1000);
+  const innerR = pBladeInner(p), outerR = pBladeRadius(p), bs = pBladeSize(p);
+  const len = outerR - innerR;
+  // Single "ghost trail" per blade — only for self, single shadow op, no
+  // per-tick alpha-loop allocations. Cuts ~12 fillRect+shadow calls per
+  // player per frame compared to the old 4-ghost dot trail.
+  for (let i = 0; i < p.bc; i++){
+    const ang = (p.b ? p.sp : 0) + tB * p.bs + (i / p.bc) * TAU;
     ctx.save();
-    ctx.translate(bx,by); ctx.rotate(ang*2);
-    ctx.fillStyle='#1a1d24';
-    ctx.shadowColor = isYou ? '#2a8a5f' : col;
-    ctx.shadowBlur = 5;
-    ctx.fillRect(-bs,-bs*0.25,bs*2,bs*0.5);
-    ctx.fillRect(-bs*0.25,-bs,bs*0.5,bs*2);
+    ctx.translate(px, py);
+    ctx.rotate(ang);
+    if (isYou) {
+      // Faint sweep echo behind current angle — gives a sense of motion.
+      const trailAng = -0.08 * Math.sign(p.bs) * Math.min(1, Math.abs(p.bs) / 4);
+      ctx.save();
+      ctx.rotate(trailAng);
+      ctx.globalAlpha = 0.18;
+      ctx.fillStyle = '#5fc28d';
+      ctx.fillRect(innerR, -bs * 0.4, len, bs * 0.8);
+      ctx.restore();
+      ctx.globalAlpha = 1;
+      ctx.shadowColor = '#5fc28d';
+      ctx.shadowBlur = 8;
+    }
+    // Tapered blade body — a sword silhouette. Wider at the hilt, point at tip.
+    ctx.fillStyle = '#1a1d24';
+    ctx.beginPath();
+    ctx.moveTo(innerR, -bs * 0.65);
+    ctx.lineTo(outerR - bs * 0.4, -bs * 0.35);
+    ctx.lineTo(outerR, 0);
+    ctx.lineTo(outerR - bs * 0.4, bs * 0.35);
+    ctx.lineTo(innerR, bs * 0.65);
+    ctx.closePath();
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    // Edge highlight (one stroke instead of two fillRects).
+    ctx.strokeStyle = isYou ? '#5fc28d' : col;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(innerR + 4, -bs * 0.5);
+    ctx.lineTo(outerR - bs * 0.5, -bs * 0.22);
+    ctx.stroke();
+    // Hilt — circular guard at the inner end.
     ctx.fillStyle = isYou ? '#2a8a5f' : col;
-    ctx.fillRect(-bs*0.85,-bs*0.12,bs*1.7,bs*0.24);
-    ctx.fillRect(-bs*0.12,-bs*0.85,bs*0.24,bs*1.7);
-    ctx.shadowBlur=0;
+    ctx.beginPath();
+    ctx.arc(innerR, 0, bs * 0.55, 0, TAU);
+    ctx.fill();
     ctx.restore();
   }
 
