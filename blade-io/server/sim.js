@@ -18,6 +18,15 @@ const GEM_CAP         = 250;  // hard ceiling on simultaneous gems
 const AUGMENT_CAP     = 25;   // hard ceiling on level-up orbs
 const ENEMY_CAP       = 120;  // hard ceiling on simultaneous enemies
 
+// Boss wave escalation — every BOSS_WAVE_INTERVAL seconds, N champions
+// spawn at once with a pre-warning event. Number scales with elapsed time.
+const BOSS_WAVE_INTERVAL = 90;   // s between waves
+const BOSS_WAVE_TELEGRAPH = 3;   // s warning before champs spawn
+
+// Player-killer "hot" aura — eat another player, glow red for KILL_GLOW_S.
+// Visible signal to everyone else that you just took a kill.
+const KILL_GLOW_S = 8;
+
 const ARCHETYPES = {
   reaver: {
     name: 'REAVER',
@@ -259,6 +268,8 @@ function onPlayerKilled(world, p, killer) {
   }
   if (killer && killer.id !== p.id) {
     killer.mass += p.mass * 0.3; // killer gets a chunk directly
+    // "Hot" aura — visible to everyone for KILL_GLOW_S seconds. Stacks but caps.
+    killer.killGlow = Math.min(KILL_GLOW_S * 2, (killer.killGlow || 0) + KILL_GLOW_S);
   }
   world.events.push({
     type: 'kill',
@@ -279,6 +290,7 @@ function tickPlayer(world, p, dt, intent) {
   if (p.regen > 0 && p.hp < p.maxHp) p.hp = Math.min(p.maxHp, p.hp + p.regen * dt);
   if (p.dashCd > 0) p.dashCd -= dt;
   if (p.dashing > 0) p.dashing -= dt;
+  if (p.killGlow > 0) p.killGlow = Math.max(0, p.killGlow - dt);
 
   // Dash request from intent
   if (intent && intent.dash && p.dashCd <= 0 && !p.dead) {
@@ -584,6 +596,46 @@ function tickWorld(world, dt, intentsById) {
     }
   }
 
+  // Boss waves — every BOSS_WAVE_INTERVAL seconds, a swarm of champions
+  // descends. We emit a `boss_wave_warning` event BOSS_WAVE_TELEGRAPH
+  // seconds before so the client can ramp tension (toast + dramatic audio).
+  // The swarm size grows with each wave: 1, 2, 3, 4, 5(cap).
+  const nextWave = world._nextBossWave || BOSS_WAVE_INTERVAL;
+  if (!world._bossWaveWarned && world.t >= nextWave - BOSS_WAVE_TELEGRAPH) {
+    const waveNum = Math.floor(nextWave / BOSS_WAVE_INTERVAL);
+    world._bossWaveWarned = true;
+    world.events.push({ type: 'boss_wave_warning', n: Math.min(5, waveNum), wave: waveNum });
+  }
+  if (world.t >= nextWave) {
+    const waveNum = Math.floor(nextWave / BOSS_WAVE_INTERVAL);
+    const champCount = Math.min(5, waveNum);
+    const players = [...world.players.values()].filter(p => !p.dead);
+    if (players.length > 0) {
+      const wave = 1 + Math.floor(world.t / 30);
+      for (let i = 0; i < champCount; i++) {
+        const target = players[Math.floor(Math.random() * players.length)];
+        const ang = Math.random() * TAU;
+        const dist = rand(700, 1100);
+        const ex = clamp(target.x + Math.cos(ang) * dist, 50, WORLD.w - 50);
+        const ey = clamp(target.y + Math.sin(ang) * dist, 50, WORLD.h - 50);
+        const e = {
+          id: nid(world),
+          x: ex, y: ey, r: 32,
+          hp: 280 + wave * 16, maxHp: 280 + wave * 16,
+          speed: 60 + wave * 0.9, dmg: 26, xp: 24,
+          kind: 'champion', atkRate: 0.85,
+          hitT: 0, atkCd: Math.random() * 0.3,
+          _dmgAcc: 0, _dmgEmitT: 0,
+        };
+        world.enemies.set(e.id, e);
+        world.events.push({ type: 'champion_spawn', x: e.x, y: e.y, id: e.id });
+      }
+      world.events.push({ type: 'boss_wave', n: champCount, wave: waveNum });
+    }
+    world._nextBossWave = nextWave + BOSS_WAVE_INTERVAL;
+    world._bossWaveWarned = false;
+  }
+
   // Spawn mobs (halved from before — was too dense, was lagging)
   world.spawnT -= dt;
   if (world.spawnT <= 0) {
@@ -760,6 +812,46 @@ function tickWorld(world, dt, intentsById) {
   }
 }
 
+// ---------- Per-viewer snapshot culling ----------
+// Each client only needs entities within its view + a margin. Without this,
+// every connected client receives every enemy/gem/augment in the world every
+// tick. With 50 clients and ~120 enemies + ~250 gems, that's 50× the same
+// data hitting the wire. Culling keeps each client's snap to ~30 enemies +
+// ~50 gems — the data they actually need to render.
+const VIEW_CULL_R = 1300;             // viewport diagonal at min zoom + slack
+const VIEW_CULL_R2 = VIEW_CULL_R * VIEW_CULL_R;
+
+function cullSnapshot(full, viewerId, vx, vy) {
+  const enemies = [];
+  for (let i = 0; i < full.enemies.length; i++) {
+    const e = full.enemies[i];
+    const dx = e.x - vx, dy = e.y - vy;
+    if (dx * dx + dy * dy < VIEW_CULL_R2) enemies.push(e);
+  }
+  const gems = [];
+  for (let i = 0; i < full.gems.length; i++) {
+    const g = full.gems[i];
+    const dx = g.x - vx, dy = g.y - vy;
+    if (dx * dx + dy * dy < VIEW_CULL_R2) gems.push(g);
+  }
+  const augments = [];
+  for (let i = 0; i < full.augments.length; i++) {
+    const a = full.augments[i];
+    // Always include orbs owned by viewer so they can navigate to them
+    // even if the orb drifted off-screen.
+    if (a.o === viewerId) { augments.push(a); continue; }
+    const dx = a.x - vx, dy = a.y - vy;
+    if (dx * dx + dy * dy < VIEW_CULL_R2) augments.push(a);
+  }
+  return {
+    t: full.t,
+    players: full.players,    // keep all — needed for leaderboard + minimap
+    enemies, gems, augments,
+    shrines: full.shrines,
+    events: full.events,
+  };
+}
+
 // ---------- Snapshot for network ----------
 // Compact representation; only what the client needs to render.
 function snapshot(world) {
@@ -789,6 +881,7 @@ function snapshot(world) {
       bz: p.blade.size,
       sp: Math.round(p.spinPhase * 100) / 100,
       ks: p._killCount || 0,
+      kg: Math.round((p.killGlow || 0) * 10) / 10,    // hot aura timer
     });
   }
   const enemies = [];
@@ -828,5 +921,5 @@ module.exports = {
   newWorld, initWorld, makePlayer, nid,
   tickWorld, tickPlayer, botIntent, generateLevelUpOptions, applyUpgrade,
   pRadius, pSpeed, pBladeRadius, pBladeInner, pBladeSize, pBladeDmg, pView,
-  snapshot,
+  snapshot, cullSnapshot,
 };

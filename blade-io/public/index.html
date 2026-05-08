@@ -164,6 +164,8 @@
       <span class="lbl">PING</span>
       <span class="val" id="pingVal" style="font-family:'DM Mono',monospace;font-size:13px">—</span>
     </div>
+    <div class="vsep"></div>
+    <button id="muteBtn" title="Toggle sound" style="pointer-events:auto;background:none;border:none;cursor:pointer;font-size:16px;padding:0 4px;line-height:1;color:var(--ink-soft)">🔊</button>
   </div>
 </div>
 
@@ -235,6 +237,16 @@ const hpFill=$('hpFill'),hpNum=$('hpNum'),xpFill=$('xpFill'),
       buildTags=$('buildTags'),toasts=$('toasts'),
       dashCdEl=$('dashCd'),dashBtn=$('dashBtn'),connStatus=$('connStatus');
 board.addEventListener('click',()=>board.classList.toggle('collapsed'));
+const muteBtn = $('muteBtn');
+if (muteBtn) {
+  muteBtn.textContent = _muted ? '🔇' : '🔊';
+  muteBtn.addEventListener('click', e => {
+    e.stopPropagation();
+    const m = toggleMute();
+    muteBtn.textContent = m ? '🔇' : '🔊';
+    if (!m) ensureAudio();  // unlock + ping a click sound back
+  });
+}
 
 // ===== Input =====
 const keys={};
@@ -400,6 +412,7 @@ function handleServerMessage(m){
         spawnRing(lx, ly, 160, 'rgba(95,194,141,.35)', 1.05);
         burst(lx, ly, '#5fc28d', 36, 420);
         floatText(lx, ly - 90, 'LEVEL ' + meSnap.l, '#5fc28d', 30);
+        sfx.levelup();
       }
       prevLevel = meSnap.l;
       // detect death
@@ -407,6 +420,7 @@ function handleServerMessage(m){
         iAmDead = true;
         localDashing = 0; localDashCd = 0;
         comboCount = 0; comboTimer = 0;
+        sfx.death();
         showDeath(meSnap);
       } else if (!meSnap.d && iAmDead) {
         iAmDead = false;
@@ -464,9 +478,83 @@ function sendInput(){
         // Visual flourish on the predicted dash start.
         spawnRing(me.x, me.y, 50, 'rgba(42,138,95,.5)', 0.4);
         burst(me.x, me.y, '#2a8a5f', 8, 260);
+        sfx.dash();
       }
     }
   }
+}
+
+// ===== Audio (WebAudio synth — zero asset loads) =====
+// All sounds are generated programmatically via OscillatorNode + GainNode.
+// First user interaction unlocks the AudioContext (browser autoplay policy).
+// Mute toggle persists in localStorage.
+let _audioCtx = null;
+let _muted = (ls && ls.getItem('blade_mute') === '1') || false;
+function ensureAudio(){
+  if (_muted) return null;
+  if (!_audioCtx) {
+    try { _audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+    catch(e){ _audioCtx = null; return null; }
+  }
+  if (_audioCtx.state === 'suspended') _audioCtx.resume();
+  return _audioCtx;
+}
+function _tone(freq, dur, type, gain, attack){
+  const c = ensureAudio(); if (!c) return;
+  const t = c.currentTime;
+  const o = c.createOscillator(), g = c.createGain();
+  o.type = type || 'sine';
+  o.frequency.value = freq;
+  g.gain.setValueAtTime(0, t);
+  g.gain.linearRampToValueAtTime(gain, t + (attack || 0.005));
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g); g.connect(c.destination);
+  o.start(t); o.stop(t + dur + 0.02);
+}
+function _sweep(f0, f1, dur, type, gain){
+  const c = ensureAudio(); if (!c) return;
+  const t = c.currentTime;
+  const o = c.createOscillator(), g = c.createGain();
+  o.type = type || 'sawtooth';
+  o.frequency.setValueAtTime(f0, t);
+  o.frequency.exponentialRampToValueAtTime(f1, t + dur);
+  g.gain.setValueAtTime(gain, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g); g.connect(c.destination);
+  o.start(t); o.stop(t + dur + 0.02);
+}
+function _noise(dur, gain, hpfHz){
+  const c = ensureAudio(); if (!c) return;
+  const t = c.currentTime;
+  const len = Math.floor(c.sampleRate * dur);
+  const buf = c.createBuffer(1, len, c.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) data[i] = (Math.random()*2-1) * (1 - i/len);
+  const src = c.createBufferSource(); src.buffer = buf;
+  const f = c.createBiquadFilter(); f.type = 'highpass';
+  f.frequency.setValueAtTime(hpfHz || 1500, t);
+  f.frequency.exponentialRampToValueAtTime(400, t + dur);
+  const g = c.createGain(); g.gain.value = gain;
+  src.connect(f); f.connect(g); g.connect(c.destination);
+  src.start(t);
+}
+const sfx = {
+  hit:        () => _tone(700 + Math.random()*300, 0.04, 'square',   0.025),
+  enemyKill:  () => { _tone(523, 0.1, 'triangle', 0.05); setTimeout(()=>_tone(784, 0.12, 'triangle', 0.05), 50); },
+  champKill:  () => { _sweep(880, 220, 0.45, 'sawtooth', 0.09); _tone(110, 0.5, 'sine', 0.07); },
+  playerKill: () => { _sweep(200, 80, 0.35, 'sawtooth', 0.12); _tone(440, 0.15, 'square', 0.06); },
+  dash:       () => _noise(0.16, 0.14, 2400),
+  levelup:    () => { [523,659,784,1047].forEach((f,i)=>setTimeout(()=>_tone(f,0.18,'sine',0.06), i*55)); },
+  bossWarn:   () => { _sweep(220, 110, 0.7, 'sawtooth', 0.10); setTimeout(()=>_sweep(220,110,0.7,'sawtooth',0.08), 250); },
+  death:      () => _sweep(220, 55, 0.55, 'square', 0.10),
+  shrine:     () => { [392, 523].forEach((f,i)=>setTimeout(()=>_tone(f,0.25,'sine',0.07), i*70)); },
+  augment:    () => _tone(1100, 0.18, 'triangle', 0.06),
+  hurt:       () => _tone(150 + Math.random()*40, 0.08, 'square', 0.04),
+};
+function toggleMute(){
+  _muted = !_muted;
+  if (ls) ls.setItem('blade_mute', _muted ? '1' : '0');
+  return _muted;
 }
 
 // ===== Visual effects (purely client-side, from events) =====
@@ -538,7 +626,7 @@ function handleEvent(ev){
   if (ev.type === 'hit') {
     // small burst at the hit player; if it's me, gentle shake
     burst(ev.x, ev.y, '#d94a5e', 3, 100);
-    if (ev.id === myId) shake = Math.max(shake, 0.08);
+    if (ev.id === myId) { shake = Math.max(shake, 0.08); sfx.hurt(); }
   } else if (ev.type === 'dmg') {
     // Damage numbers — only show our own. Event x/y is the blade-tip impact
     // point, so the number floats from where the blade actually struck.
@@ -562,8 +650,11 @@ function handleEvent(ev){
         spawnRing(ev.x, ev.y, 70, '#ffd455', 0.7);
         floatText(ev.x, ev.y - 40, 'CHAMPION DOWN', '#ffd455', 22);
         pushToast(`<b>CHAMPION DOWN</b> · +${ev.xp} XP`, 'kill');
+        sfx.champKill();
       } else if (ev.xp >= 1) {
         floatText(ev.x, ev.y - 6, '+' + ev.xp + ' XP', '#5fc28d', 12);
+        // Cheap kills get the soft chime; gate to keep audio sparse during waves.
+        if (Math.random() < 0.5) sfx.enemyKill();
       }
     }
   } else if (ev.type === 'champion_spawn') {
@@ -571,6 +662,16 @@ function handleEvent(ev){
     spawnRing(ev.x, ev.y, 50, '#ffd455', 0.8);
     burst(ev.x, ev.y, '#ffd455', 14, 240);
     pushToast(`<b>CHAMPION</b> incoming!`, 'kill');
+  } else if (ev.type === 'boss_wave_warning') {
+    // 3 s before the swarm — escalating tension.
+    pushToast(`<b>WAVE ${ev.wave}</b> incoming · ${ev.n} champion${ev.n>1?'s':''}`, 'kill');
+    sfx.bossWarn();
+    shake = Math.max(shake, 0.18);
+    deathFlash = Math.max(deathFlash, 0.4); // brief red wash as warning
+  } else if (ev.type === 'boss_wave') {
+    // The actual spawn moment — heavy shake + flash.
+    shake = Math.max(shake, 0.55);
+    deathFlash = Math.max(deathFlash, 0.7);
   } else if (ev.type === 'kill') {
     burst(ev.x, ev.y, ev.color || '#d94a5e', 30, 400);
     spawnRing(ev.x, ev.y, 100, ev.color || '#d94a5e', 0.7);
@@ -579,6 +680,7 @@ function handleEvent(ev){
       shake = Math.max(shake, 0.25);
       floatText(ev.x, ev.y - 30, `+${Math.floor((ev.mass||0)*0.3)} mass`, '#2a8a5f', 24);
       pushToast(`You ate <b>${escapeHtml(ev.victimName)}</b>`, 'kill');
+      sfx.playerKill();
     } else if (ev.victimId === myId) {
       // handled in 'snap' (death detection)
     } else {
@@ -593,7 +695,7 @@ function handleEvent(ev){
   } else if (ev.type === 'shrine_used') {
     spawnRing(ev.x, ev.y, 80, 'rgba(42,138,95,.6)', 0.6);
     burst(ev.x, ev.y, '#2a8a5f', 12, 180);
-    if (ev.playerId === myId) floatText(ev.x, ev.y - 40, '+50% HP', '#2a8a5f', 22);
+    if (ev.playerId === myId) { floatText(ev.x, ev.y - 40, '+50% HP', '#2a8a5f', 22); sfx.shrine(); }
   } else if (ev.type === 'augment_spawn') {
     spawnRing(ev.x, ev.y, 36, 'rgba(58,141,181,.6)', 0.5);
     if (ev.ownerId === myId) {
@@ -606,6 +708,7 @@ function handleEvent(ev){
     if (ev.playerId === myId) {
       floatText(ev.x, ev.y - 40, ev.name, col, 22);
       pushToast(`Got <b>${escapeHtml(ev.name)}</b>`, 'kill');
+      sfx.augment();
     }
   }
 }
@@ -619,6 +722,39 @@ function pBladeInner(p){return pRadius(p) + 2}                 // line start
 function pBladeSize(p){return p.bz + Math.sqrt(p.m)*0.5}
 function pView(p){return 1 + Math.min(0.7, p.m*0.0022)}
 function pSpeed(p){return Math.max(140, (260 - Math.sqrt(p.m)*7))}
+
+// Body sprite atlas — bake each archetype × (you/them) into an offscreen
+// canvas once, then draw with a single drawImage instead of 5 path ops +
+// shadowBlur per body per frame. With 15 visible players × 60 fps that's
+// ~4500 path ops/sec eliminated. Big mobile GPU win.
+const SPRITE_R = 32;       // base body radius in the sprite
+const SPRITE_PAD = 18;     // shadow bleed margin
+const SPRITE_HALF = SPRITE_R + SPRITE_PAD;
+const _bodySprites = {};
+function getBodySprite(arch, isYou) {
+  const key = arch + ':' + (isYou ? 'y' : 'n');
+  if (_bodySprites[key]) return _bodySprites[key];
+  const c = document.createElement('canvas');
+  c.width = c.height = SPRITE_HALF * 2;
+  const cx = c.getContext('2d');
+  cx.translate(SPRITE_HALF, SPRITE_HALF);
+  const baseColor = isYou ? '#2a8a5f' : (ARCHETYPES[arch] || ARCHETYPES.dervish).color;
+  const glowColor = isYou ? '#5fc28d' : baseColor;
+  cx.fillStyle = baseColor;
+  cx.shadowColor = glowColor;
+  cx.shadowBlur = 16;
+  cx.beginPath(); cx.arc(0, 0, SPRITE_R, 0, TAU); cx.fill();
+  cx.shadowBlur = 0;
+  cx.strokeStyle = 'rgba(255,253,245,.5)';
+  cx.lineWidth = 3;
+  cx.beginPath(); cx.arc(0, 0, SPRITE_R - 4, 0, TAU); cx.stroke();
+  cx.fillStyle = '#fbf6e8';
+  cx.beginPath(); cx.arc(0, 0, SPRITE_R * 0.4, 0, TAU); cx.fill();
+  cx.fillStyle = baseColor;
+  cx.beginPath(); cx.arc(0, 0, SPRITE_R * 0.18, 0, TAU); cx.fill();
+  _bodySprites[key] = c;
+  return c;
+}
 
 // Camera
 const cam = {x: WORLD.w/2, y: WORLD.h/2, zoom: 1, targetZoom: 1};
@@ -1089,20 +1225,24 @@ function drawPlayer(p){
     ctx.beginPath(); ctx.arc(0,0,140,0,TAU); ctx.stroke();
   }
 
-  // body
-  const baseColor = isYou ? '#2a8a5f' : col;
-  ctx.fillStyle = baseColor;
-  ctx.shadowColor = isYou ? '#5fc28d' : col;
-  ctx.shadowBlur = 12;
-  ctx.beginPath(); ctx.arc(0,0,r,0,TAU); ctx.fill();
-  ctx.shadowBlur=0;
-  ctx.strokeStyle='rgba(255,253,245,.5)';
-  ctx.lineWidth=2;
-  ctx.beginPath(); ctx.arc(0,0,r-3,0,TAU); ctx.stroke();
-  ctx.fillStyle='#fbf6e8';
-  ctx.beginPath(); ctx.arc(0,0,r*0.4,0,TAU); ctx.fill();
-  ctx.fillStyle = baseColor;
-  ctx.beginPath(); ctx.arc(0,0,r*0.18,0,TAU); ctx.fill();
+  // Killer aura — pulsing red ring around any player who recently ate
+  // another player. Visible signal: "this one's hot, watch out."
+  if (p.kg > 0) {
+    const intensity = Math.min(1, p.kg / 4);
+    const pulse = 1 + 0.18 * Math.sin(performance.now() / 110);
+    ctx.strokeStyle = `rgba(217,74,94,${0.55 * intensity})`;
+    ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.arc(0, 0, (r + 9) * pulse, 0, TAU); ctx.stroke();
+    ctx.strokeStyle = `rgba(217,74,94,${0.25 * intensity})`;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(0, 0, (r + 18) * pulse, 0, TAU); ctx.stroke();
+  }
+
+  // body — single drawImage from cached sprite atlas (5 path ops + shadow → 1 op)
+  const sprite = getBodySprite(p.a, isYou);
+  const scale = r / SPRITE_R;
+  const halfDraw = SPRITE_HALF * scale;
+  ctx.drawImage(sprite, -halfDraw, -halfDraw, halfDraw * 2, halfDraw * 2);
   ctx.restore();
 
   // Blades are LINES extending out from the body. Each blade is a tapered
@@ -1332,6 +1472,8 @@ function showStart(){
     if (!nm) nm = 'PLAYER' + Math.floor(Math.random()*99);
     playerName = nm;
     if (ls) ls.setItem('blade_name', nm);
+    // Unlock the AudioContext on this user gesture (browser autoplay policy).
+    ensureAudio();
     ws.send(JSON.stringify({type:'join', name:nm, archetype:chosenArchetype}));
     nameIn.blur();
   };

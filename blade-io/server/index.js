@@ -286,16 +286,30 @@ function tick() {
 
   respawnDeadBots();
 
-  // Death notifications to clients (kill events from sim get broadcast in snapshot)
-  // Snapshot
-  const snap = sim.snapshot(world);
-  // Per-client message: include their pending-LU state so they don't desync
-  const baseMsg = { type: 'snap', s: snap };
-  const baseStr = JSON.stringify(baseMsg);
-  for (const [ws] of sockets) {
-    if (ws.readyState === 1) {
-      try { ws.send(baseStr); } catch (e) {}
+  // Build the full snapshot once, then per-client cull around each viewer.
+  // Spectators (no joined player) get the full snap so they can still see
+  // the world. Cached fallback string for spectators avoids re-stringifying
+  // the same data N times.
+  const fullSnap = sim.snapshot(world);
+  let fullStr = null;   // lazy — only stringify if a spectator needs it
+  for (const [ws, st] of sockets) {
+    if (ws.readyState !== 1) continue;
+    let str;
+    if (st.id) {
+      const viewer = world.players.get(st.id);
+      if (viewer && !viewer.dead) {
+        const culled = sim.cullSnapshot(fullSnap, viewer.id, viewer.x, viewer.y);
+        str = JSON.stringify({ type: 'snap', s: culled });
+      } else {
+        // Dead — send full so the kill cam / leaderboard works.
+        if (!fullStr) fullStr = JSON.stringify({ type: 'snap', s: fullSnap });
+        str = fullStr;
+      }
+    } else {
+      if (!fullStr) fullStr = JSON.stringify({ type: 'snap', s: fullSnap });
+      str = fullStr;
     }
+    try { ws.send(str); } catch (e) {}
   }
 }
 
