@@ -354,7 +354,8 @@ function botIntent(world, b, dt) {
   const view = 700;
   const bRad = pRadius(b);
   let threat = null, threatD = Infinity;
-  let prey = null, preyD = Infinity;
+  let humanTarget = null, humanTargetD = Infinity;
+  let botTarget = null, botTargetD = Infinity;
   let sx = 0, sy = 0; // separation accumulator (away from nearby entities)
   for (const o of world.players.values()) {
     if (o.id === b.id || o.dead) continue;
@@ -368,9 +369,18 @@ function botIntent(world, b, dt) {
       sy -= (oy / d) * w;
     }
     if (d > view) continue;
-    if (o.mass > b.mass * 1.25) { if (d < threatD) { threatD = d; threat = o; } }
-    else if (o.mass * 1.25 < b.mass) { if (d < preyD) { preyD = d; prey = o; } }
+    if (o.mass > b.mass * 1.5) {
+      // Clearly bigger — flee.
+      if (d < threatD) { threatD = d; threat = o; }
+    } else if (!o.isBot) {
+      // Humans always preferred targets — bots focus combat on the real player.
+      if (d < humanTargetD) { humanTargetD = d; humanTarget = o; }
+    } else {
+      // Other bots are fallback targets when no human is in view.
+      if (d < botTargetD) { botTargetD = d; botTarget = o; }
+    }
   }
+  const target = humanTarget || botTarget;
   let shrine = null, shrineD = Infinity;
   if (b.hp / b.maxHp < 0.5) {
     for (const s of world.shrines) {
@@ -381,29 +391,30 @@ function botIntent(world, b, dt) {
   }
   if (threat) {
     dx = b.x - threat.x; dy = b.y - threat.y;
-    b._aiPreyId = -1;
+    b._aiTargetId = -1;
   } else if (shrine) {
     dx = shrine.x - b.x; dy = shrine.y - b.y;
-    b._aiPreyId = -1;
-  } else if (prey) {
-    // Orbit at our blade-radius so the blade tip actually passes through prey
-    // each rotation. Beelining onto prey leaves the blades sweeping empty space.
-    if (b._aiPreyId !== prey.id) {
-      b._aiPreyId = prey.id;
+    b._aiTargetId = -1;
+  } else if (target) {
+    // Orbit at our blade-radius so the blade tip passes through target each
+    // rotation. Spiral approach (mixes radial pull + tangential orbit) so the
+    // bot doesn't beeline straight in — it swirls into combat range.
+    if (b._aiTargetId !== target.id) {
+      b._aiTargetId = target.id;
       b._orbitDir = Math.random() < 0.5 ? 1 : -1;
     }
     if (Math.random() < 0.004) b._orbitDir = -b._orbitDir; // occasional juke
-    const px = prey.x - b.x, py = prey.y - b.y;
+    const px = target.x - b.x, py = target.y - b.y;
     const pd = Math.hypot(px, py) || 1;
     const optimalDist = pBladeRadius(b);
     const radialErr = pd - optimalDist;
-    const radial = Math.tanh(radialErr / 70); // smooth: +1 approach, -1 retreat
+    const radial = Math.tanh(radialErr / 150); // gentler — spiral in, never rush
     const ux = px / pd, uy = py / pd;
-    const tangential = Math.max(0, 1 - Math.abs(radial) * 0.55); // orbit weight
+    const tangential = Math.max(0.5, 1 - Math.abs(radial) * 0.45); // strong swirl always present
     dx = ux * radial + (-uy) * b._orbitDir * tangential;
     dy = uy * radial + ( ux) * b._orbitDir * tangential;
   } else {
-    b._aiPreyId = -1;
+    b._aiTargetId = -1;
     if (b._aiTargetT <= 0 || Math.hypot(b._aiTargetX - b.x, b._aiTargetY - b.y) < 60) {
       let bestG = null, bestD = Infinity;
       for (const g of world.gems.values()) {
