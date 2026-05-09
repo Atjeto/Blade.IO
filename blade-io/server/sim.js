@@ -103,7 +103,11 @@ const UPGRADES = [
   { id:'dash_cd',      name:'KINETIC',        desc:'-25% dash cooldown',         max:3, weight:0.8, apply:p=>p.dashCdMult*=0.75 },
   // SHAPE-SWAPS — strictly additive transformations. No more subtracting the
   // blades the player just earned. These are still rare (weight 0.5) and 1-shot.
-  { id:'reaver_swap',  name:'HEAVY BLADES',   desc:'+50% size, +40% dmg, -15% spin',  max:1, weight:0.5, apply:p=>{p.blade.size*=1.5; p.blade.dmg*=1.4; p.blade.speed*=0.85}, tag:'shape' },
+  // HEAVY BLADES — the classic Reaver tradeoff: lose 1 blade, gain size +
+  // damage. Floor at 2 (not 1) so a Reaver who already starts with 2 doesn't
+  // get gutted. From 4+ blades you give up one for the power bump, which is
+  // the intended deal. From 2 blades you just get the buffs free.
+  { id:'reaver_swap',  name:'HEAVY BLADES',   desc:'-1 blade, +60% size, +50% dmg, -15% spin', max:1, weight:0.5, apply:p=>{p.blade.count=Math.max(2,p.blade.count-1); p.blade.size*=1.6; p.blade.dmg*=1.5; p.blade.speed*=0.85}, tag:'shape' },
   { id:'dervish_swap', name:'BLADE STORM',    desc:'+2 blades, -15% size, +25% spin', max:1, weight:0.5, apply:p=>{p.blade.count=Math.min(7,p.blade.count+2); p.blade.size*=0.85; p.blade.speed*=1.25}, tag:'shape' },
   { id:'warden_swap',  name:'SWEEPING ORBIT', desc:'+50% reach, +1 blade',            max:1, weight:0.5, apply:p=>{p.blade.radius*=1.5; p.blade.count=Math.min(7,p.blade.count+1)}, tag:'shape' },
   { id:'glass_cannon', name:'GLASS EDGE',     desc:'+50% dmg, -30% HP',          max:1, weight:0.6, apply:p=>{p.dmgMult*=1.5; p.maxHp=Math.floor(p.maxHp*0.7); p.hp=Math.min(p.hp,p.maxHp)}, tag:'risk' },
