@@ -82,24 +82,33 @@ const ARCHETYPES = {
   }
 };
 
+// Each upgrade has a `weight` that biases the augment-orb pool. Damage upgrades
+// (KEEN EDGE, BLOODLUST) are 2.0× weighted so the build actually scales.
+// Shape-swaps are rare (0.5×) AND now strictly additive — no more "HEAVY
+// BLADES wiped my progression" — and `weight` defaults to 1 if omitted.
 const UPGRADES = [
-  { id:'blade_count',  name:'+1 BLADE',       desc:'Another orbiting blade', max:5, apply:p=>p.blade.count++ },
-  { id:'blade_dmg',    name:'KEEN EDGE',      desc:'+25% blade damage', max:8, apply:p=>p.blade.dmg*=1.25 },
-  { id:'blade_speed',  name:'WHIRL',          desc:'+20% rotation', max:5, apply:p=>p.blade.speed*=1.2 },
-  { id:'blade_size',   name:'WIDE BLADE',     desc:'+25% size, -5% spin', max:4, apply:p=>{p.blade.size*=1.25; p.blade.speed*=0.95} },
-  { id:'blade_radius', name:'LONG REACH',     desc:'+25% orbit, -5% dmg', max:4, apply:p=>{p.blade.radius*=1.25; p.blade.dmg*=0.95} },
-  { id:'speed',        name:'SWIFT',          desc:'+15% move speed', max:5, apply:p=>p.speedMult*=1.15 },
-  { id:'maxhp',        name:'IRON HEART',     desc:'+30 max HP, full heal', max:6, apply:p=>{p.maxHp+=30;p.hp=p.maxHp}, tag:'heal' },
-  { id:'regen',        name:'REGEN',          desc:'+1 HP/sec', max:6, apply:p=>p.regen+=1 },
-  { id:'magnet',       name:'MAGNETIZE',      desc:'+50% pickup range', max:4, apply:p=>p.magnet*=1.5 },
-  { id:'dmg',          name:'BLOODLUST',      desc:'+15% all damage', max:6, apply:p=>p.dmgMult*=1.15 },
-  { id:'dash_cd',      name:'KINETIC',        desc:'-25% dash cooldown', max:3, apply:p=>p.dashCdMult*=0.75 },
-  { id:'reaver_swap',  name:'HEAVY BLADES',   desc:'Bigger, slower, harder', max:1, apply:p=>{p.blade.size*=1.5; p.blade.count=Math.max(1,p.blade.count-1); p.blade.dmg*=1.3}, tag:'shape' },
-  { id:'dervish_swap', name:'BLADE STORM',    desc:'+2 blades, smaller, faster', max:1, apply:p=>{p.blade.count+=2; p.blade.size*=0.75; p.blade.speed*=1.3}, tag:'shape' },
-  { id:'warden_swap',  name:'SWEEPING ORBIT', desc:'+50% reach, +1 blade', max:1, apply:p=>{p.blade.radius*=1.5; p.blade.dmg*=0.85; p.blade.count++}, tag:'shape' },
-  { id:'glass_cannon', name:'GLASS EDGE',     desc:'+50% dmg, -30% HP', max:1, apply:p=>{p.dmgMult*=1.5; p.maxHp=Math.floor(p.maxHp*0.7); p.hp=Math.min(p.hp,p.maxHp)}, tag:'risk' },
-  { id:'fortress',     name:'FORTRESS',       desc:'+60 HP, -15% speed', max:1, apply:p=>{p.maxHp+=60;p.hp+=60;p.speedMult*=0.85}, tag:'risk' },
-  { id:'ravenous',     name:'RAVENOUS',       desc:'Eating gives +50% mass', max:1, apply:p=>{p.massMult*=1.5}, tag:'risk' },
+  { id:'blade_count',  name:'+1 BLADE',       desc:'Another orbiting blade',     max:5, weight:1.6, apply:p=>p.blade.count++ },
+  { id:'blade_dmg',    name:'KEEN EDGE',      desc:'+25% blade damage',          max:8, weight:2.2, apply:p=>p.blade.dmg*=1.25 },
+  { id:'blade_speed',  name:'WHIRL',          desc:'+20% rotation',              max:5, weight:1.4, apply:p=>p.blade.speed*=1.2 },
+  // WIDE BLADE was a 25 % bump on a stat already inflated by sqrt(mass)*0.5,
+  // so it felt invisible. New: 40 % size + 10 % damage. Stacks 4× so a fully-
+  // committed build = (1.4)^4 = 3.84× width. Will be visible.
+  { id:'blade_size',   name:'WIDE BLADE',     desc:'+40% size, +10% damage',     max:4, weight:1.5, apply:p=>{p.blade.size*=1.40; p.blade.dmg*=1.10} },
+  { id:'blade_radius', name:'LONG REACH',     desc:'+25% reach',                 max:4, weight:1.2, apply:p=>p.blade.radius*=1.25 },
+  { id:'speed',        name:'SWIFT',          desc:'+15% move speed',            max:5, weight:1.0, apply:p=>p.speedMult*=1.15 },
+  { id:'maxhp',        name:'IRON HEART',     desc:'+30 max HP, full heal',      max:6, weight:1.0, apply:p=>{p.maxHp+=30;p.hp=p.maxHp}, tag:'heal' },
+  { id:'regen',        name:'REGEN',          desc:'+1 HP/sec',                  max:6, weight:0.9, apply:p=>p.regen+=1 },
+  { id:'magnet',       name:'MAGNETIZE',      desc:'+50% pickup range',          max:4, weight:0.7, apply:p=>p.magnet*=1.5 },
+  { id:'dmg',          name:'BLOODLUST',      desc:'+15% all damage',            max:6, weight:2.0, apply:p=>p.dmgMult*=1.15 },
+  { id:'dash_cd',      name:'KINETIC',        desc:'-25% dash cooldown',         max:3, weight:0.8, apply:p=>p.dashCdMult*=0.75 },
+  // SHAPE-SWAPS — strictly additive transformations. No more subtracting the
+  // blades the player just earned. These are still rare (weight 0.5) and 1-shot.
+  { id:'reaver_swap',  name:'HEAVY BLADES',   desc:'+50% size, +40% dmg, -15% spin',  max:1, weight:0.5, apply:p=>{p.blade.size*=1.5; p.blade.dmg*=1.4; p.blade.speed*=0.85}, tag:'shape' },
+  { id:'dervish_swap', name:'BLADE STORM',    desc:'+2 blades, -15% size, +25% spin', max:1, weight:0.5, apply:p=>{p.blade.count=Math.min(7,p.blade.count+2); p.blade.size*=0.85; p.blade.speed*=1.25}, tag:'shape' },
+  { id:'warden_swap',  name:'SWEEPING ORBIT', desc:'+50% reach, +1 blade',            max:1, weight:0.5, apply:p=>{p.blade.radius*=1.5; p.blade.count=Math.min(7,p.blade.count+1)}, tag:'shape' },
+  { id:'glass_cannon', name:'GLASS EDGE',     desc:'+50% dmg, -30% HP',          max:1, weight:0.6, apply:p=>{p.dmgMult*=1.5; p.maxHp=Math.floor(p.maxHp*0.7); p.hp=Math.min(p.hp,p.maxHp)}, tag:'risk' },
+  { id:'fortress',     name:'FORTRESS',       desc:'+60 HP, -15% speed',         max:1, weight:0.6, apply:p=>{p.maxHp+=60;p.hp+=60;p.speedMult*=0.85}, tag:'risk' },
+  { id:'ravenous',     name:'RAVENOUS',       desc:'Eating gives +50% mass',     max:1, weight:0.6, apply:p=>p.massMult*=1.5, tag:'risk' },
 ];
 
 const rand = (a,b) => a + Math.random() * (b-a);
@@ -151,7 +160,12 @@ const pSpeed  = p => Math.max(140, (260 - Math.sqrt(p.mass) * 7)) * p.speedMult;
 const pBladeRadius = p => p.blade.radius + Math.sqrt(p.mass) * 1.8;
 const pBladeInner  = p => pRadius(p) + 2;
 const pBladeSize   = p => p.blade.size   + Math.sqrt(p.mass) * 0.5;
-const pBladeDmg    = p => p.blade.dmg    * p.dmgMult;
+// Damage scales with sqrt(mass) so growing the player IS itself a power curve
+// — not just upgrade-gated. Without this term, mob HP scales with wave-time
+// while the player stays static unless RNG hands them KEEN EDGE. The user's
+// "the bigger I am the LESS damage I do to mobs" complaint is the perceived
+// inverse-feel of that mismatch. mass=10 → +2.2 dmg. mass=400 → +14 dmg.
+const pBladeDmg    = p => (p.blade.dmg + Math.sqrt(p.mass) * 0.7) * p.dmgMult;
 const pView        = p => 1 + Math.min(0.7, p.mass * 0.0022);
 
 // ---------- World factory ----------
@@ -486,16 +500,37 @@ function tickPlayer(world, p, dt, intent) {
   }
 }
 
+// Weighted pick — used by augment-orb spawn. Damage upgrades are 2× weighted
+// so a build actually scales toward damage instead of accumulating random
+// utility picks. Without this, the chance of any specific damage upgrade was
+// 1/17 and stacking KEEN EDGE three times was a coin-flip-cubed event.
+function weightedPick(pool) {
+  let total = 0;
+  for (let i = 0; i < pool.length; i++) total += (pool[i].weight || 1);
+  let r = Math.random() * total;
+  for (let i = 0; i < pool.length; i++) {
+    r -= (pool[i].weight || 1);
+    if (r <= 0) return pool[i];
+  }
+  return pool[pool.length - 1];
+}
+
 // ---------- Augment orbs (in-world level-up pickups) ----------
 function spawnAugmentOrb(world, p) {
-  // Pick a random valid upgrade for this player
+  // Pool of usable upgrades for this player.
   const pool = UPGRADES.filter(u => (p.upgradeUses[u.id] || 0) < u.max);
-  // Force-include heal if low HP
   let upg;
-  if (p.hp / p.maxHp < 0.55 && Math.random() < 0.5) {
+  // PATCH UP — only when truly low (HP < 35 %), modest probability (30 %),
+  // AND with a 15 s cooldown so chained level-ups during a fight don't all
+  // become heals. Was 55 % threshold + 50 % chance + no cooldown, which
+  // turned every levelup-during-combat into PATCH UP.
+  const lowHp = p.hp / p.maxHp < 0.35;
+  const healCdElapsed = world.t - (p._lastHealOffer != null ? p._lastHealOffer : -100) > 15;
+  if (lowHp && healCdElapsed && Math.random() < 0.30) {
     upg = { id: 'instant_heal', name: 'PATCH UP', desc: 'Restore 50% HP', max: 99, tag: 'heal' };
+    p._lastHealOffer = world.t;
   } else if (pool.length > 0) {
-    upg = pool[Math.floor(Math.random() * pool.length)];
+    upg = weightedPick(pool);
   } else {
     return; // nothing to give
   }
@@ -640,9 +675,12 @@ function botLevelUp(b) {
 function generateLevelUpOptions(p) {
   const pool = UPGRADES.filter(u => (p.upgradeUses[u.id] || 0) < u.max);
   const picks = [];
+  // Weighted draw without replacement — pick, remove, re-roll on remaining.
   while (picks.length < 3 && pool.length > 0) {
-    const i = Math.floor(Math.random() * pool.length);
-    picks.push(pool.splice(i, 1)[0]);
+    const u = weightedPick(pool);
+    const idx = pool.indexOf(u);
+    if (idx >= 0) pool.splice(idx, 1);
+    picks.push(u);
   }
   if (p.hp / p.maxHp < 0.55) {
     const idx = picks.findIndex(o => o.tag === 'heal');
