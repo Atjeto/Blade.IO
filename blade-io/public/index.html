@@ -128,6 +128,29 @@
   .endStats .lbl{font-size:9px;color:var(--muted);font-family:'DM Mono',monospace;letter-spacing:.15em;text-transform:uppercase}
   .endStats .v{font-size:22px;font-weight:700}
   @media (hover:hover) and (pointer:fine){.endStats .v{font-size:26px}}
+  /* Level-up offer panel — floating, non-blocking. World keeps running while
+     you decide; auto-picks option 1 after 12s if you don't tap. */
+  #lvlPanel{position:fixed;left:50%;top:calc(96px + var(--safe-top));transform:translateX(-50%);z-index:8;display:none;flex-direction:column;gap:6px;width:min(440px, calc(100vw - 24px));pointer-events:auto}
+  #lvlPanel.show{display:flex;animation:lvlIn .25s cubic-bezier(.2,.9,.3,1.2)}
+  @keyframes lvlIn{from{opacity:0;transform:translate(-50%,-12px)}to{opacity:1;transform:translate(-50%,0)}}
+  #lvlPanel .lvlHdr{font-family:'DM Mono',monospace;font-size:11px;letter-spacing:.18em;color:var(--ink);text-align:center;background:rgba(255,253,245,.92);border:1px solid var(--line);padding:6px 10px;border-radius:8px;backdrop-filter:blur(6px);box-shadow:0 2px 10px rgba(60,50,30,.08);display:flex;justify-content:space-between;align-items:center}
+  #lvlPanel .lvlHdr b{color:var(--you);font-weight:700;font-size:12px;letter-spacing:.18em}
+  #lvlPanel .lvlHdr .timer{font-size:10px;color:var(--muted);font-feature-settings:'tnum'}
+  #lvlPanel .lvlOpts{display:flex;flex-direction:column;gap:6px}
+  @media (min-width:520px){#lvlPanel .lvlOpts{flex-direction:row}}
+  #lvlPanel .lvlOpt{flex:1;background:#fff;border:2px solid var(--line);color:var(--ink);padding:10px 12px;font:inherit;cursor:pointer;display:flex;flex-direction:column;align-items:flex-start;gap:2px;border-radius:10px;transition:all .12s ease;text-align:left;-webkit-tap-highlight-color:transparent;min-height:60px}
+  #lvlPanel .lvlOpt:hover,#lvlPanel .lvlOpt:focus{outline:none;border-color:var(--you);background:rgba(95,194,141,.08);transform:scale(1.02)}
+  #lvlPanel .lvlOpt:active{transform:scale(.98)}
+  #lvlPanel .lvlOpt .nm{font-weight:700;font-size:13px;color:var(--ink)}
+  #lvlPanel .lvlOpt .ds{font-size:11px;color:var(--muted);line-height:1.3}
+  #lvlPanel .lvlOpt .kb{font-family:'DM Mono',monospace;font-size:9px;color:var(--muted);position:absolute;top:6px;right:8px;opacity:.5}
+  #lvlPanel .lvlOpt{position:relative}
+  #lvlPanel .lvlOpt.heal{border-color:rgba(217,74,94,.5);background:rgba(217,74,94,.06)}
+  #lvlPanel .lvlOpt.heal .nm{color:var(--hot)}
+  #lvlPanel .lvlOpt.shape{border-color:rgba(58,141,181,.5);background:rgba(58,141,181,.06)}
+  #lvlPanel .lvlOpt.shape .nm{color:var(--cool)}
+  #lvlPanel .lvlOpt.risk{border-color:rgba(138,91,156,.5);background:rgba(138,91,156,.06)}
+  #lvlPanel .lvlOpt.risk .nm{color:var(--plum)}
   #connStatus{position:fixed;top:8px;left:50%;transform:translateX(-50%);z-index:9;font-family:'DM Mono',monospace;font-size:10px;letter-spacing:.15em;color:var(--muted);background:rgba(255,253,245,.9);padding:4px 10px;border-radius:99px;border:1px solid var(--line);text-transform:uppercase;display:none}
   #connStatus.show{display:block}
   #connStatus.bad{color:var(--hot);border-color:rgba(217,74,94,.3)}
@@ -181,6 +204,10 @@
 <div id="stick"><div class="nub" id="nub"></div></div>
 <button id="dashBtn">DASH<span class="cd" id="dashCd">READY</span></button>
 
+<div id="lvlPanel">
+  <div class="lvlHdr"><span>// <b>LEVEL UP</b> · pick a path</span><span class="timer" id="lvlTimer">12s</span></div>
+  <div class="lvlOpts" id="lvlOpts"></div>
+</div>
 <div id="modal"><div class="card" id="card"></div></div>
 
 <script>
@@ -246,6 +273,10 @@ addEventListener('keydown',e=>{
   keys[e.key.toLowerCase()]=true;
   if([' ','arrowup','arrowdown','arrowleft','arrowright'].includes(e.key.toLowerCase())) e.preventDefault();
   if(e.key===' ') queueDash();
+  // Level-up modal: 1/2/3 to pick. Defined further down — guarded for TDZ.
+  if (typeof pickLvlOption === 'function' && (e.key === '1' || e.key === '2' || e.key === '3')) {
+    pickLvlOption(parseInt(e.key, 10) - 1);
+  }
 });
 addEventListener('keyup',e=>{keys[e.key.toLowerCase()]=false});
 
@@ -647,6 +678,35 @@ function pushToast(html, cls=''){
   setTimeout(()=>{el.style.opacity='0';el.style.transform='translateX(-12px)';setTimeout(()=>el.remove(),300);},2400);
 }
 
+// ===== Level-up offer modal =====
+const lvlPanel = $('lvlPanel');
+const lvlOptsEl = $('lvlOpts');
+const lvlTimerEl = $('lvlTimer');
+let lvlOffer = null;             // { options, deadline (ms epoch) }
+function showLvlOffer(options) {
+  lvlOffer = { options, deadline: performance.now() + 12000 };
+  lvlOptsEl.innerHTML = options.map((o, i) => {
+    const cls = o.tag === 'heal' ? 'heal' : (o.tag === 'shape' ? 'shape' : (o.tag === 'risk' ? 'risk' : ''));
+    return `<button class="lvlOpt ${cls}" data-i="${i}"><span class="kb">${i+1}</span><span class="nm">${escapeHtml(o.name)}</span><span class="ds">${escapeHtml(o.desc)}</span></button>`;
+  }).join('');
+  lvlPanel.classList.add('show');
+  lvlOptsEl.querySelectorAll('.lvlOpt').forEach(btn => {
+    btn.addEventListener('click', () => pickLvlOption(parseInt(btn.dataset.i, 10)));
+  });
+}
+function hideLvlOffer() {
+  lvlPanel.classList.remove('show');
+  lvlOffer = null;
+}
+function pickLvlOption(i) {
+  if (!lvlOffer || !ws || ws.readyState !== 1) return;
+  const opt = lvlOffer.options[i];
+  if (!opt) return;
+  ws.send(JSON.stringify({ type: 'levelup_pick', upgradeId: opt.id }));
+  // Hide immediately for responsiveness; server confirms via levelup_resolved.
+  hideLvlOffer();
+}
+
 function handleEvent(ev){
   if (ev.type === 'hit') {
     // small burst at the hit player; if it's me, gentle shake
@@ -782,6 +842,48 @@ function handleEvent(ev){
     spawnRing(ev.x, ev.y, 40, '#8a5b9c', 0.45);
     burst(ev.x, ev.y, '#8a5b9c', 10, 160);
     sfx.summon();
+  } else if (ev.type === 'levelup_offer') {
+    if (ev.playerId === myId) {
+      showLvlOffer(ev.options);
+      sfx.levelup();
+    }
+  } else if (ev.type === 'levelup_resolved') {
+    if (ev.playerId === myId) {
+      hideLvlOffer();
+      const col = ev.tag === 'heal' ? '#d94a5e' : (ev.tag === 'shape' ? '#3a8db5' : (ev.tag === 'risk' ? '#8a5b9c' : '#5fc28d'));
+      pushToast(`${ev.auto ? 'Auto-picked' : 'Got'} <b>${escapeHtml(ev.name)}</b>`, 'kill');
+      if (me) {
+        burst(me.x, me.y, col, 14, 220);
+        spawnRing(me.x, me.y, 60, col, 0.5);
+      }
+    }
+  } else if (ev.type === 'evolution_unlocked') {
+    if (ev.playerId === myId) {
+      shake = Math.max(shake, 0.5);
+      levelUpFlash = 0.8;
+      pushToast(`<b>EVOLUTION · ${escapeHtml(ev.name)}</b> · ${escapeHtml(ev.desc)}`, 'kill');
+      if (me) {
+        floatText(me.x, me.y - 100, ev.name, '#ffd455', 32);
+        spawnRing(me.x, me.y, 80, '#ffd455', 0.6);
+        spawnRing(me.x, me.y, 160, '#ffd455', 0.9);
+        spawnRing(me.x, me.y, 260, '#ffd455', 1.2);
+        burst(me.x, me.y, '#ffd455', 40, 460);
+      }
+      sfx.champKill();   // re-uses the dramatic descending sweep
+      setTimeout(() => sfx.levelup(), 250);
+    }
+  } else if (ev.type === 'meteor_warning') {
+    // Telegraph — the falling fireball is rendered each frame from
+    // lastSnap.meteors; this just plays a tense audio cue.
+    sfx.bossWarn();
+  } else if (ev.type === 'meteor_impact') {
+    spawnRing(ev.x, ev.y, ev.r * 2.4, '#e09f3e', 0.55);
+    spawnRing(ev.x, ev.y, ev.r * 1.4, '#d94a5e', 0.4);
+    burst(ev.x, ev.y, '#e09f3e', 36, 460);
+    if (me && Math.hypot(me.x - ev.x, me.y - ev.y) < 800) {
+      shake = Math.max(shake, 0.4);
+    }
+    sfx.explode();
   }
 }
 
@@ -956,6 +1058,14 @@ function loop(now){
   if (now - bladeSparkLastPurge > 5000) {
     bladeSparkLastPurge = now;
     bladeSparkT.clear();
+  }
+
+  // Tick the level-up offer timer + auto-hide on expiry (server will also
+  // auto-pick option[0] and emit levelup_resolved).
+  if (lvlOffer) {
+    const remain = Math.max(0, lvlOffer.deadline - now);
+    lvlTimerEl.textContent = (remain / 1000).toFixed(1) + 's';
+    if (remain <= 0) hideLvlOffer();
   }
 
   // particles, floats, rings, shake
@@ -1135,6 +1245,42 @@ function render(){
       ctx.fillRect(a.x - w/2, a.y - r - 18, w, 14);
       ctx.fillStyle = tagCol;
       ctx.fillText(a.n, a.x, a.y - r - 8);
+    }
+  }
+
+  // Meteor warnings — telegraph rings + falling fireball. Each meteor's t
+  // counts down 1.5s → 0; we draw the impact circle on the ground (red,
+  // pulsing, brighter as t→0) and the meteor falling toward it from above.
+  if (lastSnap.meteors && lastSnap.meteors.length) {
+    for (const m of lastSnap.meteors) {
+      if (m.x < vx0 - 200 || m.x > vx1 + 200 || m.y < vy0 - 200 || m.y > vy1 + 200) continue;
+      const urgency = 1 - Math.max(0, m.t / 1.5);   // 0 → 1 as time runs out
+      // Ground impact ring — pulsing, gets opaque + thick as urgency rises.
+      ctx.save();
+      ctx.translate(m.x, m.y);
+      const pulse = 1 + 0.06 * Math.sin(performance.now() / 70);
+      ctx.strokeStyle = `rgba(217,74,94,${0.4 + urgency * 0.5})`;
+      ctx.lineWidth = 2 + urgency * 4;
+      ctx.setLineDash([12, 8]);
+      ctx.lineDashOffset = -performance.now() / 30;
+      ctx.beginPath(); ctx.arc(0, 0, m.r * pulse, 0, TAU); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = `rgba(217,74,94,${0.05 + urgency * 0.18})`;
+      ctx.beginPath(); ctx.arc(0, 0, m.r, 0, TAU); ctx.fill();
+      // Falling fireball — a small comet streak above the impact point.
+      const fallH = (m.t / 1.5) * 220;
+      const fy = -fallH;
+      const grd = ctx.createRadialGradient(0, fy, 2, 0, fy, 18);
+      grd.addColorStop(0, '#fff7e0');
+      grd.addColorStop(0.4, '#ffd455');
+      grd.addColorStop(1, 'rgba(217,74,94,0)');
+      ctx.fillStyle = grd;
+      ctx.beginPath(); ctx.arc(0, fy, 18, 0, TAU); ctx.fill();
+      // Trail
+      ctx.strokeStyle = 'rgba(255,212,85,.4)';
+      ctx.lineWidth = 4;
+      ctx.beginPath(); ctx.moveTo(0, fy); ctx.lineTo(0, fy + 50); ctx.stroke();
+      ctx.restore();
     }
   }
 
@@ -1488,12 +1634,25 @@ function drawPlayer(p){
     ctx.fill();
     ctx.shadowBlur = 0;
     // Edge highlight (one stroke instead of two fillRects).
-    ctx.strokeStyle = isYou ? '#5fc28d' : col;
-    ctx.lineWidth = 1.5;
+    // Golden trim if any evolution is active — visible "your build paid off"
+    // signal. ev field is a bitmask: 1=executioner 2=cyclone 4=eternal_arc 8=vampire.
+    const isEvo = (p.ev || 0) > 0;
+    ctx.strokeStyle = isEvo ? '#ffd455' : (isYou ? '#5fc28d' : col);
+    ctx.lineWidth = isEvo ? 2 : 1.5;
     ctx.beginPath();
     ctx.moveTo(innerR + 4, -bs * 0.5);
     ctx.lineTo(outerR - bs * 0.5, -bs * 0.22);
     ctx.stroke();
+    if (isEvo) {
+      // Subtle glow line on the back edge too — only paid for visually
+      // when the player has actually unlocked an evo.
+      ctx.strokeStyle = 'rgba(255,212,85,.5)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(innerR + 4, bs * 0.5);
+      ctx.lineTo(outerR - bs * 0.5, bs * 0.22);
+      ctx.stroke();
+    }
     // Hilt — circular guard at the inner end.
     ctx.fillStyle = isYou ? '#2a8a5f' : col;
     ctx.beginPath();

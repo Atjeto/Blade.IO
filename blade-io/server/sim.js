@@ -146,6 +146,15 @@ function makePlayer({ id, x, y, name, archetype = 'dervish', isBot = false }) {
     // count as executes.
     _executeT: 0,
     killGlow: 0,
+    // Level-up offer system. _lvlQueue holds option-sets waiting to be
+    // shown (champion-cluster pickups can grant multiple levels at once).
+    // _activeOffer is the currently displayed pick; auto-resolves at
+    // expiresAt if the player doesn't choose.
+    _lvlQueue: [],
+    _activeOffer: null,
+    // Build evolutions — passive unlocks when stacking certain upgrade
+    // combinations. Compact flag map: { executioner: 1, cyclone: 1, ... }
+    evos: {},
   };
   ARCHETYPES[archetype].init(p);
   return p;
@@ -182,6 +191,7 @@ function newWorld() {
     gems: new Map(),            // id -> gem
     augments: new Map(),        // id -> augment orb (level-up pickup)
     powerups: new Map(),        // id -> powerup orb (shield/berserk/magnet/slowmo)
+    meteors: [],                // pending meteor strikes (telegraph then impact)
     shrines: [],                // fixed list
     spawnT: 0,
     events: [],                 // transient events (kills, hits) sent each tick
@@ -319,6 +329,10 @@ function damageEnemy(world, e, dmg, killer, hitX, hitY) {
       world.gems.set(bonusG.id, bonusG);
       world.events.push({ type: 'execute', x: e.x, y: e.y, killerId: killer.id, kind: e.kind });
     }
+    // VAMPIRE evolution: heal 5 HP per mob killed.
+    if (killer && killer.evos && killer.evos.vampire && killer.hp < killer.maxHp) {
+      killer.hp = Math.min(killer.maxHp, killer.hp + 5);
+    }
     world.events.push({
       type: 'enemy_killed',
       x: e.x, y: e.y,
@@ -392,6 +406,26 @@ function tickPlayer(world, p, dt, intent) {
   if (p.slowmoT > 0)  p.slowmoT  = Math.max(0, p.slowmoT  - dt);
   if (p._executeT > 0) p._executeT = Math.max(0, p._executeT - dt);
 
+  // Level-up offer pump. If no active offer and the queue has one, pop it
+  // and emit. If the active offer's window expired, auto-pick option[0]
+  // (the player walked away or AFK'd) so they aren't forever stuck.
+  if (!p._activeOffer && p._lvlQueue && p._lvlQueue.length > 0) {
+    const opts = p._lvlQueue.shift();
+    p._activeOffer = { options: opts, expiresAt: world.t + 12 };
+    world.events.push({ type: 'levelup_offer', playerId: p.id, options: opts });
+  }
+  if (p._activeOffer && world.t >= p._activeOffer.expiresAt) {
+    const fallback = p._activeOffer.options[0];
+    if (fallback) {
+      applyUpgrade(p, fallback.id);
+      world.events.push({
+        type: 'levelup_resolved', playerId: p.id,
+        upgradeId: fallback.id, name: fallback.name, tag: fallback.tag, auto: 1,
+      });
+    }
+    p._activeOffer = null;
+  }
+
   // Dash request from intent
   if (intent && intent.dash && p.dashCd <= 0 && !p.dead) {
     let mx = intent.mx || 0, my = intent.my || 0;
@@ -439,7 +473,8 @@ function tickPlayer(world, p, dt, intent) {
   const innerR = pBladeInner(p), outerR = pBladeRadius(p);
   const bs = pBladeSize(p);
   // Berserk powerup: +50% blade damage during the buff window.
-  const bdmg = pBladeDmg(p) * (p.berserkT > 0 ? 1.5 : 1);
+  const baseBdmg = pBladeDmg(p) * (p.berserkT > 0 ? 1.5 : 1);
+  const hasExecutioner = p.evos && p.evos.executioner;
   for (let i = 0; i < b.count; i++) {
     const ang = (p.isBot ? p.spinPhase : 0) + world.t * b.speed + (i / b.count) * TAU;
     const ux = Math.cos(ang), uy = Math.sin(ang);
@@ -453,7 +488,10 @@ function tickPlayer(world, p, dt, intent) {
       const rr = bs + e.r;
       if (px2 * px2 + py2 * py2 < rr * rr) {
         // Hit point is the closest point on the segment (not enemy center).
-        damageEnemy(world, e, bdmg * dt * 8, p, cx, cy);
+        // EXECUTIONER evolution: ×1.5 damage when target is below 50 % HP.
+        const eHpFrac = e.hp / (e.maxHp || 1);
+        const dmg = baseBdmg * (hasExecutioner && eHpFrac < 0.5 ? 1.5 : 1);
+        damageEnemy(world, e, dmg * dt * 8, p, cx, cy);
         // Knockback radially out from the player so blades sweep enemies
         // outward, never trapping them against the body.
         const ddx = e.x - p.x, ddy = e.y - p.y, dd = Math.hypot(ddx, ddy) || 1;
@@ -471,7 +509,9 @@ function tickPlayer(world, p, dt, intent) {
       const px2 = o.x - cx, py2 = o.y - cy;
       const rr = bs + pRadius(o);
       if (px2 * px2 + py2 * py2 < rr * rr) {
-        damagePlayer(world, o, bdmg * dt * 8, p);
+        const oHpFrac = o.hp / (o.maxHp || 1);
+        const dmg = baseBdmg * (hasExecutioner && oHpFrac < 0.5 ? 1.5 : 1);
+        damagePlayer(world, o, dmg * dt * 8, p);
       }
     }
   }
@@ -497,7 +537,14 @@ function tickPlayer(world, p, dt, intent) {
         if (p.isBot) {
           botLevelUp(p);
         } else {
-          spawnAugmentOrb(world, p);
+          // Queue a 3-option offer. The pump in tickPlayer below pops the
+          // queue when no offer is currently active. Cap the queue at 5
+          // so a champion-cluster pickup can't blow up memory.
+          const opts = generateLevelUpOptions(p);
+          if (opts.length > 0) {
+            p._lvlQueue.push(opts);
+            if (p._lvlQueue.length > 5) p._lvlQueue.shift();
+          }
         }
       }
     }
@@ -697,7 +744,7 @@ function generateLevelUpOptions(p) {
   return picks.map(o => ({ id: o.id, name: o.name, desc: o.desc, tag: o.tag || null }));
 }
 
-function applyUpgrade(p, upgradeId) {
+function applyUpgrade(p, upgradeId, world) {
   let upg = UPGRADES.find(u => u.id === upgradeId);
   if (!upg && upgradeId === 'instant_heal') {
     upg = { id: 'instant_heal', max: 99, apply: pp => { pp.hp = Math.min(pp.maxHp, pp.hp + pp.maxHp * 0.5); } };
@@ -706,6 +753,31 @@ function applyUpgrade(p, upgradeId) {
   if ((p.upgradeUses[upg.id] || 0) >= upg.max) return false;
   upg.apply(p);
   p.upgradeUses[upg.id] = (p.upgradeUses[upg.id] || 0) + 1;
+  // Build evolutions — stacking certain combos unlocks an "ultimate":
+  // EXECUTIONER: KEEN×5 + WIDE×3 → blade hits below 50 % HP enemies crit (×1.5).
+  // CYCLONE:     BLADE STORM + WHIRL×4    → permanent +30 % blade speed kicker.
+  // ETERNAL ARC: SWEEPING ORBIT + LONG×3  → permanent +20 % reach kicker.
+  // VAMPIRE:     IRON HEART×4 + REGEN×4   → on-kill heal (5 HP per mob).
+  if (world && p.evos) {
+    if (!p.evos.executioner && (p.upgradeUses.blade_dmg||0) >= 5 && (p.upgradeUses.blade_size||0) >= 3) {
+      p.evos.executioner = 1;
+      world.events.push({ type: 'evolution_unlocked', playerId: p.id, name: 'EXECUTIONER', desc: 'Blades crit on weakened mobs' });
+    }
+    if (!p.evos.cyclone && (p.upgradeUses.dervish_swap||0) >= 1 && (p.upgradeUses.blade_speed||0) >= 4) {
+      p.evos.cyclone = 1;
+      p.blade.speed *= 1.30;
+      world.events.push({ type: 'evolution_unlocked', playerId: p.id, name: 'CYCLONE', desc: 'Permanent +30% spin' });
+    }
+    if (!p.evos.eternal_arc && (p.upgradeUses.warden_swap||0) >= 1 && (p.upgradeUses.blade_radius||0) >= 3) {
+      p.evos.eternal_arc = 1;
+      p.blade.radius *= 1.20;
+      world.events.push({ type: 'evolution_unlocked', playerId: p.id, name: 'ETERNAL ARC', desc: 'Permanent +20% reach' });
+    }
+    if (!p.evos.vampire && (p.upgradeUses.maxhp||0) >= 4 && (p.upgradeUses.regen||0) >= 4) {
+      p.evos.vampire = 1;
+      world.events.push({ type: 'evolution_unlocked', playerId: p.id, name: 'VAMPIRE', desc: 'Heal 5 HP per mob killed' });
+    }
+  }
   return true;
 }
 
@@ -984,6 +1056,50 @@ function tickWorld(world, dt, intentsById) {
   }
 
 
+  // Meteor shower — every 60-100 s a 3-5 meteor barrage drops on random
+  // map locations. Each meteor telegraphs 1.5 s before impact (visible red
+  // ring on the client) so players can dodge. On impact: 35 dmg in radius
+  // + a gem drop (compensation for chaos / reward for clearing area).
+  // Skipped during boss-wave windows so the player isn't doubled up on.
+  world._meteorT = (world._meteorT != null ? world._meteorT : 50) - dt;
+  if (world._meteorT <= 0) {
+    world._meteorT = rand(60, 100);
+    const count = 3 + Math.floor(Math.random() * 3);   // 3-5 meteors
+    for (let i = 0; i < count; i++) {
+      const mx = rand(250, WORLD.w - 250);
+      const my = rand(250, WORLD.h - 250);
+      world.meteors.push({ x: mx, y: my, r: 95, dmg: 35, t: 1.5 });
+      world.events.push({ type: 'meteor_warning', x: mx, y: my, r: 95 });
+    }
+  }
+  for (let i = world.meteors.length - 1; i >= 0; i--) {
+    const m = world.meteors[i];
+    m.t -= dt;
+    if (m.t <= 0) {
+      world.events.push({ type: 'meteor_impact', x: m.x, y: m.y, r: m.r });
+      // Damage players in radius — meteor is unowned (no killGlow / kill credit).
+      for (const ply of world.players.values()) {
+        if (ply.dead) continue;
+        if (dist2(ply.x, ply.y, m.x, m.y) < m.r * m.r) {
+          damagePlayer(world, ply, m.dmg, null);
+        }
+      }
+      // Damage enemies in radius too — clearing the area is the reward.
+      const eToKill = [];
+      for (const e of world.enemies.values()) {
+        if (dist2(e.x, e.y, m.x, m.y) < m.r * m.r) eToKill.push(e);
+      }
+      for (const e of eToKill) damageEnemy(world, e, m.dmg, null, m.x, m.y);
+      // A small gem cluster lands at the impact crater.
+      for (let g = 0; g < 4; g++) {
+        const ang = Math.random() * TAU, d = rand(8, 40);
+        const gem = { id: nid(world), x: m.x + Math.cos(ang)*d, y: m.y + Math.sin(ang)*d, xp: 1, mass: 1, r: 5, life: GEM_LIFE };
+        world.gems.set(gem.id, gem);
+      }
+      world.meteors.splice(i, 1);
+    }
+  }
+
   // Power-up orbs — rare floating buffs. Spawn timer ticks; when it fires
   // and we're under the cap, pop one in at a random map location.
   world._powerupT = (world._powerupT != null ? world._powerupT : POWERUP_INTERVAL_MIN) - dt;
@@ -1084,6 +1200,7 @@ function cullSnapshot(full, viewerId, vx, vy) {
     t: full.t,
     players: full.players,    // keep all — needed for leaderboard + minimap
     enemies, gems, augments, powerups,
+    meteors: full.meteors,    // tiny array, no point culling
     shrines: full.shrines,
     events: full.events,
   };
@@ -1131,6 +1248,15 @@ function snapshot(world) {
     if (p.magnetT  > 0) sp.mg = Math.round(p.magnetT  * 10) / 10;
     if (p.slowmoT  > 0) sp.sm = Math.round(p.slowmoT  * 10) / 10;
     if (p._executeT > 0) sp.ex = Math.round(p._executeT * 10) / 10;
+    // Evolution flag bitfield — only when any are set.
+    if (p.evos) {
+      let evMask = 0;
+      if (p.evos.executioner) evMask |= 1;
+      if (p.evos.cyclone)     evMask |= 2;
+      if (p.evos.eternal_arc) evMask |= 4;
+      if (p.evos.vampire)     evMask |= 8;
+      if (evMask) sp.ev = evMask;
+    }
     players.push(sp);
   }
   const enemies = [];
@@ -1167,10 +1293,14 @@ function snapshot(world) {
       l: Math.round(pu.life * 10) / 10,
     });
   }
+  const meteors = world.meteors.length ? world.meteors.map(m => ({
+    x: Math.round(m.x), y: Math.round(m.y), r: m.r,
+    t: Math.round(m.t * 100) / 100,                     // seconds to impact
+  })) : [];
   return {
     // Precise enough to drive client-side blade-angle sync without visible jitter.
     t: Math.round(world.t * 1000) / 1000,
-    players, enemies, gems, augments, powerups, shrines,
+    players, enemies, gems, augments, powerups, meteors, shrines,
     events: world.events.slice(),
   };
 }

@@ -214,6 +214,21 @@ wss.on('connection', (ws, req) => {
       });
       world.players.set(id, fresh);
       send(ws, { type: 'joined', id, archetype: arche });
+    } else if (msg.type === 'levelup_pick') {
+      const id = wsState.id;
+      if (!id) return;
+      const p = world.players.get(id);
+      if (!p || p.dead || !p._activeOffer) return;
+      // Validate the pick was actually one of the offered options
+      // (anti-cheat: client could send any upgradeId).
+      const choice = p._activeOffer.options.find(o => o.id === msg.upgradeId);
+      if (!choice) return;
+      sim.applyUpgrade(p, choice.id, world);
+      world.events.push({
+        type: 'levelup_resolved', playerId: p.id,
+        upgradeId: choice.id, name: choice.name, tag: choice.tag, auto: 0,
+      });
+      p._activeOffer = null;
     } else if (msg.type === 'ping') {
       send(ws, { type: 'pong', t: msg.t });
     }
