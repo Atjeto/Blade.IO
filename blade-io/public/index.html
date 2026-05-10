@@ -312,7 +312,7 @@ let localDashing = 0;        // remaining dash duration (s)
 let localDashDx = 0, localDashDy = 0;
 let localDashCd = 0;         // local estimate of dash cooldown (s)
 const DASH_DURATION = 0.18;
-const DASH_CD_BASE = 1.6;
+const DASH_CD_BASE = 1.4;
 const DASH_SPEED_MULT = 4.5;
 function queueDash(){
   if (!myId || iAmDead) return;
@@ -895,7 +895,7 @@ function pBladeRadius(p){return p.br + Math.sqrt(p.m)*1.8}    // outer tip
 function pBladeInner(p){return pRadius(p) + 2}                 // line start
 function pBladeSize(p){return p.bz + Math.sqrt(p.m)*0.5}
 function pView(p){return 1 + Math.min(0.7, p.m*0.0022)}
-function pSpeed(p){return Math.max(140, (260 - Math.sqrt(p.m)*7))}
+function pSpeed(p){return Math.max(160, (280 - Math.sqrt(p.m)*7))}
 
 // Body sprite atlas — bake each archetype × (you/them) into an offscreen
 // canvas once, then draw with a single drawImage instead of 5 path ops +

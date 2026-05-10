@@ -13,12 +13,12 @@ const TAU = Math.PI * 2;
 const WORLD = { w: 3600, h: 3600 };
 
 // Memory caps — designed for 512 MB free-tier hosting.
-// ENEMY_CAP 120 → 80: with summoners + boss waves the world was a mosh pit.
-// At 80 there's still plenty of pressure but each individual mob registers.
+// ENEMY_CAP 95: previous 80 was readable but pacing-light. 95 keeps room
+// for summoners + waves while still well under the readability ceiling.
 const GEM_LIFE        = 60;   // seconds; uncollected gems decay
-const GEM_CAP         = 200;  // hard ceiling on simultaneous gems
+const GEM_CAP         = 220;  // hard ceiling on simultaneous gems
 const AUGMENT_CAP     = 20;   // hard ceiling on level-up orbs
-const ENEMY_CAP       = 80;   // hard ceiling on simultaneous enemies
+const ENEMY_CAP       = 95;   // hard ceiling on simultaneous enemies
 
 // Boss wave escalation — every BOSS_WAVE_INTERVAL seconds, N champions
 // spawn at once with a pre-warning event. Number scales with elapsed time.
@@ -132,7 +132,7 @@ function makePlayer({ id, x, y, name, archetype = 'dervish', isBot = false }) {
     iframes: 3.0,                    // grace period on spawn
     xp: 0, lv: 1, xpToNext: 5,
     blade: { count: 2, radius: 90, speed: 3.2, dmg: 14, size: 14 },
-    magnet: 140, regen: 0,
+    magnet: 180, regen: 0,
     speedMult: 1, dmgMult: 1, massMult: 1, dashCdMult: 1,
     dashCd: 0, dashing: 0, dashDx: 0, dashDy: 0,
     spinPhase: Math.random() * TAU,
@@ -162,10 +162,10 @@ function makePlayer({ id, x, y, name, archetype = 'dervish', isBot = false }) {
 
 // ---------- Mass-derived getters ----------
 const pRadius = p => 14 + Math.sqrt(p.mass) * 1.6;
-// Speed floor lifted to 140 so fast mobs (140 + wave*3) don't outpace big
-// players. The line-blade now covers the body-edge gap, but the player still
-// needs to be able to disengage occasionally.
-const pSpeed  = p => Math.max(140, (260 - Math.sqrt(p.mass) * 7)) * p.speedMult;
+// Speed: floor 160, base 280. Both ends pushed up — early game feels
+// snappier and big-mass players still outrun wave-10 fast grunts (~170)
+// instead of being floor-clamped right at their speed.
+const pSpeed  = p => Math.max(160, (280 - Math.sqrt(p.mass) * 7)) * p.speedMult;
 // pBladeRadius is the OUTER tip distance — the far end of the blade line.
 // pBladeInner is where the blade starts (just outside the body), so the line
 // covers every radius from body edge out to the tip. Mobs that get close
@@ -437,8 +437,11 @@ function tickPlayer(world, p, dt, intent) {
     if (mx !== 0 || my !== 0) {
       p.dashDx = mx; p.dashDy = my;
       p.dashing = 0.18;
-      p.dashCd = 1.6 * p.dashCdMult;
+      p.dashCd = 1.4 * p.dashCdMult;
       p.iframes = Math.max(p.iframes, 0.18);
+      // Fresh damage-set for this dash so each enemy you slam through
+      // takes one tick of dash-damage, not continuous overlap damage.
+      p._dashHit = null;
       // Open the execute window — kills landed in the next EXECUTE_WINDOW
       // seconds count as dash-executes (bonus XP + visual flourish).
       p._executeT = EXECUTE_WINDOW;
@@ -462,6 +465,25 @@ function tickPlayer(world, p, dt, intent) {
   p.vy += (tvy - p.vy) * Math.min(1, dt * 8);
   p.x = clamp(p.x + p.vx * dt, pRadius(p), WORLD.w - pRadius(p));
   p.y = clamp(p.y + p.vy * dt, pRadius(p), WORLD.h - pRadius(p));
+
+  // Dash-through damage. Each enemy gets hit ONCE per dash for 25 dmg —
+  // turns dash into a real combat tool, not just escape. Clearing summoner
+  // minions or repositioning through a swarm now actually thins them.
+  // Mass-scaled: bigger players hit harder when they ram through.
+  if (p.dashing > 0) {
+    if (!p._dashHit) p._dashHit = new Set();
+    const dashDmg = 25 + Math.sqrt(p.mass) * 1.5;
+    const pR = pRadius(p);
+    for (const e of world.enemies.values()) {
+      if (p._dashHit.has(e.id)) continue;
+      const dx = e.x - p.x, dy = e.y - p.y;
+      const rr = pR + e.r;
+      if (dx * dx + dy * dy < rr * rr) {
+        damageEnemy(world, e, dashDmg, p, e.x, e.y);
+        p._dashHit.add(e.id);
+      }
+    }
+  }
 
   // Blades hit enemies + other players via segment-vs-circle. Each blade is a
   // LINE from innerR to outerR along its rotating angle — anything within the
@@ -533,7 +555,9 @@ function tickPlayer(world, p, dt, intent) {
       while (p.xp >= p.xpToNext) {
         p.xp -= p.xpToNext;
         p.lv++;
-        p.xpToNext = Math.floor(p.xpToNext * 1.4 + 2);
+        // Eased curve: *1.3+1 (was *1.4+2). Level 10 needs 53 XP instead
+        // of 138. Mid-late game pacing was the slow stretch.
+        p.xpToNext = Math.floor(p.xpToNext * 1.3 + 1);
         if (p.isBot) {
           botLevelUp(p);
         } else {
@@ -869,14 +893,14 @@ function tickWorld(world, dt, intentsById) {
     world._bossWaveWarned = false;
   }
 
-  // Spawn mobs. Tuned down from earlier values — peak spawn was hitting
-  // 7-13 mobs/sec which saturated ENEMY_CAP and created visual mosh-pit
-  // chaos. New cap: ~2.5 mobs/sec at peak intensity.
+  // Spawn mobs. Tuned for "fast progression but readable" — ~4 mobs/sec
+  // at peak (up from 2.5). With ENEMY_CAP=95 the screen still breathes
+  // between fights but XP-density is high enough to climb levels.
   world.spawnT -= dt;
   if (world.spawnT <= 0) {
-    const intensity = clamp(world.t / 60, 0.5, 1.4);
-    world.spawnT = rand(0.50, 0.85) / intensity;
-    const burstN = 1 + Math.floor(intensity * 0.3);
+    const intensity = clamp(world.t / 60, 0.5, 1.7);
+    world.spawnT = rand(0.40, 0.70) / intensity;
+    const burstN = 1 + Math.floor(intensity * 0.4);
     for (let i = 0; i < burstN; i++) spawnEnemy(world);
   }
   if (world.enemies.size > ENEMY_CAP) {
